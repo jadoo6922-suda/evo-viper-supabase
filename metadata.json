@@ -1,0 +1,6 @@
+{
+  "name": "DigitalStore - متجر رقمي فاخر",
+  "description": "منصة تجارة رقمية متكاملة بمنتجات رقمية، محفظة داخلية بنظام Ledger غير قابل للتلاعب، تحويلات واستقبال آمن برموز QR، نظام إثبات وتحقيق بالتحويلات، مركز نزاعات، ولوحة إدارة كاملة.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

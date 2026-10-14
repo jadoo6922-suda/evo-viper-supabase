@@ -1,0 +1,30 @@
+@import "tailwindcss";
+
+:root {
+  --font-arabic: 'Alexandria', sans-serif;
+  --font-latin: 'Plus Jakarta Sans', sans-serif;
+}
+
+html[dir="rtl"] {
+  font-family: 'Alexandria', sans-serif;
+}
+
+html[dir="ltr"] {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+}
+
+/* Custom subtle scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0b0d10;
+}
+::-webkit-scrollbar-thumb {
+  background: #232730;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a4150;
+}
