@@ -149,7 +149,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch { return { success: false, message: language === 'ar' ? 'تعذر الاتصال بخدمة تسجيل الدخول.' : 'Could not reach the sign-in service.' }; }
     } else {
       const { data, error } = await sb.auth.signInWithPassword({ email: identifier, password: pass });
-      if (error || !data.user) return { success: false, message: language === 'ar' ? 'البريد أو كلمة المرور غير صحيحة.' : 'Incorrect email or password.' };
+      if (error || !data.user) {
+        const em = (error?.message || '').toLowerCase();
+        if (em.includes('confirm') || em.includes('not confirmed')) {
+          return {
+            success: false,
+            message: language === 'ar'
+              ? 'الحساب غير مفعّل. افتح رابط التأكيد في البريد، أو عطّل Confirm email من Supabase للاختبار.'
+              : 'Email not confirmed. Open the confirmation link, or disable Confirm email in Supabase for testing.',
+          };
+        }
+        return { success: false, message: language === 'ar' ? 'البريد أو كلمة المرور غير صحيحة.' : 'Incorrect email or password.' };
+      }
       authData = data;
     }
     const data = authData;
@@ -197,16 +208,77 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const platformStatus = await statusResponse.json().catch(() => ({}));
       if (platformStatus.maintenanceMode || platformStatus.pauseRegistrations) return { success: false, message: language === 'ar' ? 'التسجيل متوقف مؤقتاً.' : 'Registration is temporarily paused.' };
     } catch { return { success: false, message: language === 'ar' ? 'تعذر التحقق من حالة التسجيل.' : 'Could not check registration status.' }; }
-    const { data, error } = await supabase.auth.signUp({ email: cleanEmail, password: cleanPass, options: { data: { username: cleanUsername, display_name: name.trim() || cleanUsername } } });
-    if (error || !data.user) return { success: false, message: error?.message || (language === 'ar' ? 'تعذر إنشاء الحساب.' : 'Could not create account.') };
-    if (data.session) {
-      if (pin) {
-        const pinResult = await fetch('/api/auth/set-transfer-pin', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${data.session.access_token}` }, body: JSON.stringify({ newPin: pin }) });
-        if (!pinResult.ok) return { success: true, message: language === 'ar' ? 'تم إنشاء الحساب، لكن تعيين PIN لم يكتمل؛ عيّنه من إعدادات الحساب.' : 'Account created, but PIN setup did not complete. Set it in account settings.' };
+
+    const { data, error } = await sb.auth.signUp({
+      email: cleanEmail,
+      password: cleanPass,
+      options: {
+        data: { username: cleanUsername, display_name: name.trim() || cleanUsername },
+        emailRedirectTo: typeof window !== 'undefined' ? `${window.location.origin}/` : undefined,
+      },
+    });
+    if (error) {
+      const em = (error.message || '').toLowerCase();
+      if (em.includes('already') || em.includes('registered') || em.includes('exists')) {
+        return { success: false, message: language === 'ar' ? 'هذا البريد مسجّل مسبقاً. سجّل الدخول أو استعد كلمة المرور.' : 'This email is already registered. Sign in or reset your password.' };
       }
-      await refreshUser(data.session);
+      return { success: false, message: error.message || (language === 'ar' ? 'تعذر إنشاء الحساب.' : 'Could not create account.') };
     }
-    return { success: true, message: !data.session && language === 'ar' ? 'تم إنشاء الحساب. تحقق من بريدك الإلكتروني لتفعيل الدخول.' : undefined };
+    if (!data.user) return { success: false, message: language === 'ar' ? 'تعذر إنشاء الحساب.' : 'Could not create account.' };
+
+    // Supabase returns a user with empty identities when the email is already registered (anti-enumeration).
+    if (Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+      return { success: false, message: language === 'ar' ? 'هذا البريد مسجّل مسبقاً. سجّل الدخول أو استعد كلمة المرور.' : 'This email is already registered. Sign in or reset your password.' };
+    }
+
+    // Email confirmations enabled → no session until the user confirms.
+    if (!data.session) {
+      const tryLogin = await sb.auth.signInWithPassword({ email: cleanEmail, password: cleanPass });
+      if (tryLogin.data.session) {
+        if (pin) {
+          await fetch('/api/auth/set-transfer-pin', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tryLogin.data.session.access_token}` },
+            body: JSON.stringify({ newPin: pin }),
+          });
+        }
+        await refreshUser(tryLogin.data.session);
+        return { success: true, message: language === 'ar' ? 'تم إنشاء الحساب وتسجيل الدخول.' : 'Account created and signed in.' };
+      }
+      const loginErr = (tryLogin.error?.message || '').toLowerCase();
+      if (loginErr.includes('confirm') || loginErr.includes('not confirmed') || loginErr.includes('email not confirmed')) {
+        return {
+          success: true,
+          message: language === 'ar'
+            ? 'تم إنشاء الحساب. يجب تأكيد البريد من رابط الرسالة قبل تسجيل الدخول. (أو عطّل Confirm email من Supabase → Authentication → Providers → Email للاختبار)'
+            : 'Account created. Confirm your email before signing in, or disable Confirm email in Supabase for testing.',
+        };
+      }
+      return {
+        success: true,
+        message: language === 'ar'
+          ? 'تم إنشاء الحساب. إذا فشل الدخول مباشرة: فعّل الحساب من الإيميل أو عطّل Confirm email في لوحة Supabase.'
+          : 'Account created. If sign-in fails, confirm the email or disable Confirm email in Supabase.',
+      };
+    }
+
+    if (pin) {
+      const pinResult = await fetch('/api/auth/set-transfer-pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${data.session.access_token}` },
+        body: JSON.stringify({ newPin: pin }),
+      });
+      if (!pinResult.ok) {
+        return {
+          success: true,
+          message: language === 'ar'
+            ? 'تم إنشاء الحساب، لكن تعيين PIN لم يكتمل؛ عيّنه من إعدادات الحساب.'
+            : 'Account created, but PIN setup did not complete. Set it in account settings.',
+        };
+      }
+    }
+    await refreshUser(data.session);
+    return { success: true, message: language === 'ar' ? 'تم إنشاء الحساب وتسجيل الدخول.' : 'Account created and signed in.' };
   }, [language, refreshUser]);
 
   const updateTransferPin = useCallback(async (newPin: string, currentPin?: string) => {
