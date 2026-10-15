@@ -719,17 +719,80 @@ async function startServer() {
   async function getActiveProfile(userId: string) {
     const { data, error } = await getSupabaseAdmin().from('store_profiles').select(ownProfileColumns).eq('id', userId).maybeSingle();
     if (error) throw error;
-    if (!data || data.account_status !== 'active') throw new Error('account_inactive');
+    if (!data) throw new Error('profile_missing');
+    if (data.account_status !== 'active') throw new Error('account_inactive');
     return data;
+  }
+
+  /** Create profile/wallet/security rows if Auth user exists but trigger never ran. */
+  async function ensureProfileForUser(user: { id: string; email?: string | null; user_metadata?: Record<string, any> }) {
+    const db = getSupabaseAdmin();
+    const { data: existing, error: existingError } = await db.from('store_profiles').select(ownProfileColumns).eq('id', user.id).maybeSingle();
+    if (existingError) throw existingError;
+    if (existing) {
+      if (existing.account_status !== 'active') throw new Error('account_inactive');
+      return existing;
+    }
+    const meta = user.user_metadata || {};
+    const email = String(user.email || meta.email || '').trim().toLowerCase();
+    const usernameBase = String(meta.username || (email ? email.split('@')[0] : `user_${user.id.slice(0, 8)}`))
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '_')
+      .slice(0, 24) || `user_${user.id.slice(0, 8)}`;
+    const displayName = String(meta.display_name || meta.full_name || usernameBase).slice(0, 80);
+    const now = new Date().toISOString();
+    const { data: created, error: createError } = await db.from('store_profiles').insert({
+      id: user.id,
+      email: email || null,
+      username: usernameBase,
+      display_name: displayName,
+      role: 'customer',
+      account_status: 'active',
+      security_status: 'secure',
+      created_at: now,
+      updated_at: now,
+    }).select(ownProfileColumns).maybeSingle();
+    if (createError) {
+      // Race: trigger may have inserted concurrently
+      const { data: again, error: againError } = await db.from('store_profiles').select(ownProfileColumns).eq('id', user.id).maybeSingle();
+      if (againError || !again) throw createError;
+      if (again.account_status !== 'active') throw new Error('account_inactive');
+      return again;
+    }
+    // Best-effort companion rows (ignore if already exist / RLS policies differ)
+    await db.from('store_wallets').upsert({ user_id: user.id, balance: 0, frozen: false, updated_at: now }, { onConflict: 'user_id' });
+    await db.from('store_security_profiles').upsert({ user_id: user.id, pin_enabled: false, failed_attempts: 0, updated_at: now }, { onConflict: 'user_id' });
+    return created!;
   }
 
   app.get('/api/me/profile', async (req, res) => {
     try {
       const user = await requireAuth(req);
-      const profile = await getActiveProfile(user.id);
+      let profile;
+      try {
+        profile = await getActiveProfile(user.id);
+      } catch (err: any) {
+        if (String(err?.message || '') === 'profile_missing') {
+          profile = await ensureProfileForUser(user as any);
+        } else {
+          throw err;
+        }
+      }
       return res.set('Cache-Control', 'no-store').json({ profile });
     } catch (error: any) {
-      return res.status(protectedApiErrorStatus(error)).json({ success: false, message: 'تعذر تحميل ملف الحساب.' });
+      const msg = String(error?.message || '');
+      const status =
+        ['unauthorized', 'Invalid Supabase access token', 'session_revoked'].includes(msg) ? 401
+          : msg === 'account_inactive' ? 403
+            : msg === 'profile_missing' ? 404
+              : 503;
+      const message =
+        status === 401 ? 'جلسة غير صالحة. سجّل الدخول مجدداً.'
+          : status === 403 ? 'الحساب غير نشط.'
+            : status === 404 ? 'ملف الحساب غير موجود في قاعدة البيانات.'
+              : 'تعذر تحميل ملف الحساب. تحقق من تشغيل الـ API وترحيلات Supabase.';
+      console.warn('[api/me/profile]', msg || error);
+      return res.status(status).json({ success: false, message, code: msg || 'profile_error' });
     }
   });
 
