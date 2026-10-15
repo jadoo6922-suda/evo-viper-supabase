@@ -162,9 +162,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Transfer PIN is enforced on every financial transfer, not as a second login password.
       if (profile) { setCurrentUser(profile); setUsers([profile]); logAuditEvent('USER_LOGIN', { email: profile.email, target: profile.id }); }
       return { success: true };
-    } catch (e) {
+    } catch (e: any) {
       console.error('[Supabase Auth] Profile validation failed:', e);
-      return { success: false, message: language === 'ar' ? 'تعذر تحميل ملف الحساب.' : 'Could not load your account profile.' };
+      const detail = String(e?.message || '').trim();
+      const fallbackAr = 'تعذر تحميل ملف الحساب.';
+      const fallbackEn = 'Could not load your account profile.';
+      return {
+        success: false,
+        message: language === 'ar'
+          ? (detail && detail !== fallbackEn ? detail : fallbackAr)
+          : (detail || fallbackEn),
+      };
     }
   }, [language]);
 

@@ -37,13 +37,19 @@ async function verifySupabaseToken(token: string) {
   if (error || !data.user) throw new Error('Invalid Supabase access token');
   let claims: any = {};
   try { claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')); } catch { throw new Error('Invalid Supabase access token'); }
-  // Server-side session revocation: every protected API request compares the JWT issue time
-  // with a server-controlled cutoff. A revoked token cannot keep working until natural expiry.
-  const { data: security, error: securityError } = await getSupabaseAdmin()
-    .from('store_security_profiles').select('session_revoked_at').eq('user_id', data.user.id).maybeSingle();
-  if (securityError) throw new Error('Session security check unavailable');
-  if (security?.session_revoked_at && Number(claims.iat || 0) <= Math.floor(new Date(security.session_revoked_at).getTime() / 1000)) {
-    throw new Error('session_revoked');
+  // Session revocation check — non-fatal if the security table is not migrated yet.
+  try {
+    const { data: security, error: securityError } = await getSupabaseAdmin()
+      .from('store_security_profiles').select('session_revoked_at').eq('user_id', data.user.id).maybeSingle();
+    if (!securityError && security?.session_revoked_at && Number(claims.iat || 0) <= Math.floor(new Date(security.session_revoked_at).getTime() / 1000)) {
+      throw new Error('session_revoked');
+    }
+    if (securityError) {
+      console.warn('[auth] store_security_profiles unavailable; skipping revocation check:', securityError.message);
+    }
+  } catch (e: any) {
+    if (String(e?.message || '') === 'session_revoked') throw e;
+    console.warn('[auth] session revocation check failed open:', e?.message || e);
   }
   (data.user as any).aal = claims.aal || 'aal1';
   return data.user;
