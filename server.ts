@@ -1932,7 +1932,10 @@ app.get('/api/public-config', (_req, res) => {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*all', (_req, res) => {
+    app.get('*all', (req, res) => {
+      if (req.path.startsWith('/api/')) {
+        return res.status(404).json({ success: false, message: 'API route not found', path: req.path });
+      }
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
