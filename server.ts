@@ -775,12 +775,14 @@ app.get('/api/public-config', (_req, res) => {
       .slice(0, 24) || `user_${user.id.slice(0, 8)}`;
     const displayName = String(meta.display_name || meta.full_name || usernameBase).slice(0, 80);
     const now = new Date().toISOString();
+    // DB check constraint store_profiles_role_check typically allows: user, merchant, admin, ...
+    // Frontend maps role "user" -> customer.
     const { data: created, error: createError } = await db.from('store_profiles').insert({
       id: user.id,
       email: email || null,
       username: usernameBase,
       display_name: displayName,
-      role: 'customer',
+      role: 'user',
       account_status: 'active',
       security_status: 'secure',
       created_at: now,
