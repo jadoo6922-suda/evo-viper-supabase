@@ -149,7 +149,7 @@ async function deliverDailyAdminGate() {
     throw new Error('Daily admin email is not configured: set PUBLIC_APP_URL, RESEND_API_KEY, and ADMIN_EMAIL_FROM.');
   }
   const { data: existing, error: existingError } = await db.from('store_admin_daily_access').select('id,sent_at').eq('access_date', today).maybeSingle();
-  if (existingError) throw existingError;
+  if (existingError) throw new Error(existingError.message || 'store_profiles_read_failed');
   if (existing?.sent_at) return;
   // Recover safely if the process died after reserving today's row but before sending mail.
   if (existing && !existing.sent_at) await db.from('store_admin_daily_access').delete().eq('id', existing.id);
@@ -245,7 +245,35 @@ async function startServer() {
   });
 
   // Public browser config only (anon/publishable). Never returns service_role / sb_secret_*.
-  app.get('/api/public-config', (_req, res) => {
+  
+  // Temporary diagnostics (no secrets). Remove after login is stable.
+  app.get('/api/debug/db-check', async (_req, res) => {
+    const out: Record<string, unknown> = {
+      supabaseUrlHost: (() => {
+        try { return new URL(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').host; } catch { return null; }
+      })(),
+      hasServiceRole: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+      hasAnon: Boolean(process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY),
+    };
+    try {
+      const db = getSupabaseAdmin();
+      const profiles = await db.from('store_profiles').select('id', { count: 'exact', head: true });
+      out.store_profiles = profiles.error ? { ok: false, error: profiles.error.message, code: profiles.error.code } : { ok: true, count: profiles.count };
+      const wallets = await db.from('store_wallets').select('user_id', { count: 'exact', head: true });
+      out.store_wallets = wallets.error ? { ok: false, error: wallets.error.message, code: wallets.error.code } : { ok: true, count: wallets.count };
+      const security = await db.from('store_security_profiles').select('user_id', { count: 'exact', head: true });
+      out.store_security_profiles = security.error ? { ok: false, error: security.error.message, code: security.error.code } : { ok: true, count: security.count };
+      // Auth admin smoke: list 1 user (proves service role works)
+      const authList = await db.auth.admin.listUsers({ page: 1, perPage: 1 });
+      out.authAdmin = authList.error ? { ok: false, error: authList.error.message } : { ok: true, usersSample: authList.data?.users?.length ?? 0 };
+    } catch (e: any) {
+      out.fatal = String(e?.message || e);
+    }
+    res.set('Cache-Control', 'no-store');
+    return res.json(out);
+  });
+
+app.get('/api/public-config', (_req, res) => {
     const url = String(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim().replace(/\/$/, '');
     const anon = String(process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '').trim();
     const looksSecret = anon.startsWith('sb_secret_') || (() => {
@@ -724,7 +752,7 @@ async function startServer() {
   const ownProfileColumns = 'id,email,username,display_name,role,account_status,created_at,security_status,has_pin_set,avatar_url,mfa_enabled,merchant_activated_at,merchant_license_id,merchant_license_revoked_at,merchant_license_revoke_reason,verified_seller,referral_code,referred_by,referral_pending,telegram_chat_id,telegram_username,telegram_linked_at';
   async function getActiveProfile(userId: string) {
     const { data, error } = await getSupabaseAdmin().from('store_profiles').select(ownProfileColumns).eq('id', userId).maybeSingle();
-    if (error) throw error;
+    if (error) throw new Error(error.message || 'store_profiles_read_failed');
     if (!data) throw new Error('profile_missing');
     if (data.account_status !== 'active') throw new Error('account_inactive');
     return data;
@@ -761,7 +789,7 @@ async function startServer() {
     if (createError) {
       // Race: trigger may have inserted concurrently
       const { data: again, error: againError } = await db.from('store_profiles').select(ownProfileColumns).eq('id', user.id).maybeSingle();
-      if (againError || !again) throw createError;
+      if (againError || !again) throw new Error(createError.message || 'store_profiles_insert_failed');
       if (again.account_status !== 'active') throw new Error('account_inactive');
       return again;
     }
@@ -786,7 +814,7 @@ async function startServer() {
       }
       return res.set('Cache-Control', 'no-store').json({ profile });
     } catch (error: any) {
-      const msg = String(error?.message || '');
+      const msg = String(error?.message || error?.code || 'profile_error');
       const status =
         ['unauthorized', 'Invalid Supabase access token', 'session_revoked'].includes(msg) ? 401
           : msg === 'account_inactive' ? 403
@@ -796,9 +824,9 @@ async function startServer() {
         status === 401 ? 'جلسة غير صالحة. سجّل الدخول مجدداً.'
           : status === 403 ? 'الحساب غير نشط.'
             : status === 404 ? 'ملف الحساب غير موجود في قاعدة البيانات.'
-              : 'تعذر تحميل ملف الحساب. تحقق من تشغيل الـ API وترحيلات Supabase.';
+              : `تعذر تحميل ملف الحساب: ${msg}`;
       console.warn('[api/me/profile]', msg || error);
-      return res.status(status).json({ success: false, message, code: msg || 'profile_error' });
+      return res.status(status).json({ success: false, message, code: msg || 'profile_error', detail: msg });
     }
   });
 
