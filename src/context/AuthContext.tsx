@@ -129,8 +129,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const result = await response.json();
         if (!response.ok || !result.session?.access_token || !result.session?.refresh_token) return { success: false, message: language === 'ar' ? 'اسم المستخدم أو كلمة المرور غير صحيحة.' : 'Incorrect username or password.' };
         const { data, error } = await supabase.auth.setSession({ access_token: result.session.access_token, refresh_token: result.session.refresh_token });
-        if (error || !data.user) return { success: false, message: language === 'ar' ? 'تعذر إنشاء جلسة الدخول.' : 'Could not establish a sign-in session.' };
-        authData = data;
+        if (error || !data.session?.user) {
+          return { success: false, message: language === 'ar' ? 'تعذر إنشاء جلسة الدخول.' : 'Could not establish a sign-in session.' };
+        }
+        // Ensure browser client holds the session before profile fetch.
+        const confirmed = await supabase.auth.getSession();
+        if (!confirmed.data.session?.access_token) {
+          return { success: false, message: language === 'ar' ? 'تعذر تثبيت جلسة الدخول محلياً.' : 'Could not persist the sign-in session locally.' };
+        }
+        authData = { user: data.session.user, session: confirmed.data.session };
       } catch { return { success: false, message: language === 'ar' ? 'تعذر الاتصال بخدمة تسجيل الدخول.' : 'Could not reach the sign-in service.' }; }
     } else {
       const { data, error } = await supabase.auth.signInWithPassword({ email: identifier, password: pass });

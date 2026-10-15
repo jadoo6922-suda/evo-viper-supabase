@@ -5,15 +5,19 @@ import { GoogleGenAI } from '@google/genai';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import QRCode from 'qrcode';
 
-const HMAC_SECRET = process.env.RECEIPT_HMAC_SECRET;
-if (!HMAC_SECRET || HMAC_SECRET.length < 32) {
-  throw new Error('RECEIPT_HMAC_SECRET must be a strong random secret of at least 32 characters.');
+/** Lazy HMAC secret — missing value fails only receipt/signing routes, not process boot /health. */
+function getHmacSecret(): string {
+  const secret = process.env.RECEIPT_HMAC_SECRET;
+  if (!secret || secret.length < 32) {
+    throw new Error('RECEIPT_HMAC_SECRET must be a strong random secret of at least 32 characters.');
+  }
+  return secret;
 }
 
 export function computeRealHmac(txId: string, amount: number | string): string {
   const numericAmount = Number(amount);
   const normalizedAmount = Number.isFinite(numericAmount) ? numericAmount.toFixed(2) : String(amount);
-  return crypto.createHmac('sha256', HMAC_SECRET).update(`${txId}:${normalizedAmount}`).digest('hex');
+  return crypto.createHmac('sha256', getHmacSecret()).update(`${txId}:${normalizedAmount}`).digest('hex');
 }
 
 // Server-only Supabase client. The service-role key must never use a VITE_ prefix.
@@ -213,23 +217,55 @@ function getGenAI(): GoogleGenAI {
 
 async function startServer() {
   const app = express();
-  // Trust the single reverse proxy used by Render so IP-based throttling uses the client IP.
+
+  // Behind Render / Cloudflare / reverse proxies, trust X-Forwarded-* for rate limits and secure cookies.
   app.set('trust proxy', 1);
+
+  // Liveness for host health checks — no secrets required.
+  app.get('/api/health', (_req, res) => {
+    const supabaseReady = Boolean(
+      (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL) &&
+      process.env.SUPABASE_SERVICE_ROLE_KEY
+    );
+    res.status(200).json({
+      ok: true,
+      status: 'ok',
+      service: 'evo-viper-supabase',
+      supabaseConfigured: supabaseReady,
+      hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
+      time: new Date().toISOString(),
+      timestamp: new Date().toISOString(),
+    });
+  });
+
   // Render and other hosts inject PORT. Keep 3000 as the local-development fallback.
   const PORT = Number.parseInt(process.env.PORT || '3000', 10);
 
   app.use(express.json({ limit: '20mb' }));
+
+  const allowedOrigins = new Set(
+    [process.env.PUBLIC_APP_URL, process.env.APP_URL]
+      .filter(Boolean)
+      .map((u) => String(u).replace(/\/$/, ''))
+  );
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && allowedOrigins.has(origin.replace(/\/$/, ''))) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+    }
+    if (req.method === 'OPTIONS') {
+      return res.status(204).end();
+    }
+    next();
+  });
+
   app.use(express.urlencoded({ extended: true, limit: '20mb' }));
   app.use((_req, res, next) => { res.setHeader('Referrer-Policy', 'no-referrer'); next(); });
 
-  // 1. Health check
-  app.get('/api/health', (_req, res) => {
-    res.json({
-      status: 'ok',
-      hasGeminiKey: !!process.env.GEMINI_API_KEY,
-      timestamp: new Date().toISOString(),
-    });
-  });
 
   // 2. Real OCR Verification via Gemini Vision (Supabase-backed Server API)
   app.post('/api/verify-receipt-ocr', async (req, res) => {

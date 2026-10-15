@@ -17,6 +17,12 @@ export default defineConfig(() => {
     server: {
       hmr: process.env.DISABLE_HMR !== 'true',
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      proxy: {
+        '/api': {
+          target: process.env.VITE_DEV_API_PROXY || 'http://127.0.0.1:3000',
+          changeOrigin: true,
+        },
+      },
     },
     build: {
       chunkSizeWarningLimit: 1600,

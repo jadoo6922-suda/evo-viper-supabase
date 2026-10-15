@@ -1,18 +1,35 @@
-import { supabase } from './supabase';
+import { supabase, isSupabaseConfigured } from './supabase';
 
-/** Calls same-origin protected server APIs with the current Supabase access token. */
+/** Same-origin protected API calls with the current Supabase access token. Never attach service-role keys. */
 export async function serverApi(path: string, init: RequestInit = {}): Promise<Response> {
-  const { data } = await supabase?.auth.getSession() || { data: { session: null } };
+  if (!path.startsWith('/')) {
+    throw new Error('serverApi path must be root-relative (e.g. /api/me/profile)');
+  }
+  if (!isSupabaseConfigured || !supabase) {
+    return new Response(JSON.stringify({ success: false, message: 'Supabase is not configured in this environment.' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const { data } = await supabase.auth.getSession();
   const token = data.session?.access_token;
   const headers = new Headers(init.headers || {});
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-  return fetch(path, { ...init, headers, cache: 'no-store' });
+  if (init.body != null && !headers.has('Content-Type') && !(init.body instanceof FormData)) {
+    headers.set('Content-Type', 'application/json');
+  }
+  return fetch(path, { ...init, headers, cache: 'no-store', credentials: 'same-origin' });
 }
 
 export async function fetchOwnProfile() {
   const response = await serverApi('/api/me/profile');
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || !payload.profile) throw new Error(payload.message || 'Could not load account profile.');
-  return payload.profile;
+  const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+  if (!response.ok || !(payload as { profile?: unknown }).profile) {
+    const message =
+      (payload as { message?: string }).message ||
+      (response.status === 401 ? 'Session expired. Sign in again.' : 'Could not load account profile.');
+    throw new Error(message);
+  }
+  return (payload as { profile: Record<string, unknown> }).profile;
 }
