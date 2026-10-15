@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode } from 'react';
 import { Session } from '@supabase/supabase-js';
-import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import { supabase, isSupabaseConfigured, initSupabase, getSupabase, getIsSupabaseConfigured } from '../lib/supabase';
 import { logAuditEvent } from '../lib/auditLog';
 import { fetchOwnProfile } from '../lib/serverApi';
 import { User, SessionInfo } from '../types';
@@ -94,13 +94,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    if (!supabase || !isSupabaseConfigured) { setAuthReady(true); return; }
     let alive = true;
-    supabase.auth.getSession().then(({ data }) => { if (alive) void refreshUser(data.session).finally(() => { if (alive) setAuthReady(true); }); });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (alive) void refreshUser(session).finally(() => { if (alive) setAuthReady(true); });
-    });
-    return () => { alive = false; listener.subscription.unsubscribe(); };
+    let unsub: { subscription: { unsubscribe: () => void } } | null = null;
+    void (async () => {
+      await initSupabase();
+      const sb = getSupabase();
+      if (!sb || !getIsSupabaseConfigured()) { if (alive) setAuthReady(true); return; }
+      const { data } = await sb.auth.getSession();
+      if (alive) await refreshUser(data.session).finally(() => { if (alive) setAuthReady(true); });
+      const { data: listener } = sb.auth.onAuthStateChange((_event, session) => {
+        if (alive) void refreshUser(session).finally(() => { if (alive) setAuthReady(true); });
+      });
+      unsub = listener;
+    })();
+    return () => { alive = false; unsub?.subscription.unsubscribe(); };
   }, [refreshUser]);
 
   const refreshCurrentUser = useCallback(async () => {
@@ -119,7 +126,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [currentUser?.id, currentUser?.role]);
 
   const login = useCallback(async (emailOrUsername: string, pass: string, pin?: string) => {
-    if (!supabase) return { success: false, message: language === 'ar' ? 'إعدادات Supabase غير مكتملة.' : 'Supabase is not configured.' };
+    await initSupabase();
+    const sb = getSupabase();
+    if (!sb) return { success: false, message: language === 'ar' ? 'إعدادات Supabase غير مكتملة. تأكد من SUPABASE_URL و SUPABASE_ANON_KEY على الخادم أو VITE_* عند البناء.' : 'Supabase is not configured. Set SUPABASE_URL + SUPABASE_ANON_KEY on the server, or VITE_* at build time.' };
     const identifier = emailOrUsername.trim().toLowerCase();
     if (!identifier || !pass) return { success: false, message: language === 'ar' ? 'أدخل البريد وكلمة المرور.' : 'Enter email and password.' };
     let authData: any;
@@ -128,19 +137,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const response = await fetch('/api/auth/sign-in-username', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: identifier, password: pass }) });
         const result = await response.json();
         if (!response.ok || !result.session?.access_token || !result.session?.refresh_token) return { success: false, message: language === 'ar' ? 'اسم المستخدم أو كلمة المرور غير صحيحة.' : 'Incorrect username or password.' };
-        const { data, error } = await supabase.auth.setSession({ access_token: result.session.access_token, refresh_token: result.session.refresh_token });
+        const { data, error } = await sb.auth.setSession({ access_token: result.session.access_token, refresh_token: result.session.refresh_token });
         if (error || !data.session?.user) {
           return { success: false, message: language === 'ar' ? 'تعذر إنشاء جلسة الدخول.' : 'Could not establish a sign-in session.' };
         }
-        // Ensure browser client holds the session before profile fetch.
-        const confirmed = await supabase.auth.getSession();
+        const confirmed = await sb.auth.getSession();
         if (!confirmed.data.session?.access_token) {
           return { success: false, message: language === 'ar' ? 'تعذر تثبيت جلسة الدخول محلياً.' : 'Could not persist the sign-in session locally.' };
         }
         authData = { user: data.session.user, session: confirmed.data.session };
       } catch { return { success: false, message: language === 'ar' ? 'تعذر الاتصال بخدمة تسجيل الدخول.' : 'Could not reach the sign-in service.' }; }
     } else {
-      const { data, error } = await supabase.auth.signInWithPassword({ email: identifier, password: pass });
+      const { data, error } = await sb.auth.signInWithPassword({ email: identifier, password: pass });
       if (error || !data.user) return { success: false, message: language === 'ar' ? 'البريد أو كلمة المرور غير صحيحة.' : 'Incorrect email or password.' };
       authData = data;
     }
@@ -148,7 +156,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const profile = await loadProfile(data.user.id, data.user.email || identifier);
       if (profile?.status === 'banned' || profile?.status === 'suspended') {
-        await supabase.auth.signOut();
+        await sb.auth.signOut();
         return { success: false, message: language === 'ar' ? 'الحساب موقوف. تواصل مع الدعم.' : 'This account is suspended.' };
       }
       // Transfer PIN is enforced on every financial transfer, not as a second login password.
@@ -167,7 +175,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [currentUser]);
 
   const register = useCallback(async (name: string, username: string, email: string, pass?: string, pin?: string) => {
-    if (!supabase) return { success: false, message: language === 'ar' ? 'إعدادات Supabase غير مكتملة.' : 'Supabase is not configured.' };
+    await initSupabase();
+    const sb = getSupabase();
+    if (!sb) return { success: false, message: language === 'ar' ? 'إعدادات Supabase غير مكتملة. تأكد من SUPABASE_URL و SUPABASE_ANON_KEY على الخادم أو VITE_* عند البناء.' : 'Supabase is not configured. Set SUPABASE_URL + SUPABASE_ANON_KEY on the server, or VITE_* at build time.' };
     const cleanEmail = email.trim().toLowerCase();
     const cleanUsername = username.trim().toLowerCase();
     const cleanPass = pass || '';

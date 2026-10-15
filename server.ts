@@ -238,6 +238,28 @@ async function startServer() {
     });
   });
 
+  // Public browser config only (anon/publishable). Never returns service_role / sb_secret_*.
+  app.get('/api/public-config', (_req, res) => {
+    const url = String(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim().replace(/\/$/, '');
+    const anon = String(process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '').trim();
+    const looksSecret = anon.startsWith('sb_secret_') || (() => {
+      try {
+        const part = anon.split('.')[1];
+        if (!part) return false;
+        const payload = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'));
+        return payload?.role === 'service_role';
+      } catch { return false; }
+    })();
+    if (!url || !anon || looksSecret) {
+      return res.status(503).json({
+        error: 'Supabase public config is not available. Set SUPABASE_URL and SUPABASE_ANON_KEY (publishable/anon) on the server.',
+      });
+    }
+    res.set('Cache-Control', 'no-store');
+    return res.json({ supabaseUrl: url, supabaseAnonKey: anon });
+  });
+
+
   // Render and other hosts inject PORT. Keep 3000 as the local-development fallback.
   const PORT = Number.parseInt(process.env.PORT || '3000', 10);
 

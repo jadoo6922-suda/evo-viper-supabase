@@ -1,11 +1,13 @@
-import { supabase, isSupabaseConfigured } from './supabase';
+import { getSupabase, getIsSupabaseConfigured, initSupabase } from './supabase';
 
 /** Same-origin protected API calls with the current Supabase access token. Never attach service-role keys. */
 export async function serverApi(path: string, init: RequestInit = {}): Promise<Response> {
   if (!path.startsWith('/')) {
     throw new Error('serverApi path must be root-relative (e.g. /api/me/profile)');
   }
-  if (!isSupabaseConfigured || !supabase) {
+  await initSupabase();
+  const supabase = getSupabase();
+  if (!getIsSupabaseConfigured() || !supabase) {
     return new Response(JSON.stringify({ success: false, message: 'Supabase is not configured in this environment.' }), {
       status: 503,
       headers: { 'Content-Type': 'application/json' },
