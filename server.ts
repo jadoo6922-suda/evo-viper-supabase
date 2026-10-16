@@ -93,7 +93,7 @@ async function verifySupabaseToken(token: string) {
 }
 
 
-const ADMIN_GATE_EMAIL = 'jadoo6922@gmail.com';
+const ADMIN_GATE_EMAIL = String(process.env.ADMIN_GATE_EMAIL || 'jadoo6922@gmail.com').trim().toLowerCase();
 const sha256 = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const utcDateKey = (date = new Date()) => date.toISOString().slice(0, 10);
 const randomToken = (bytes = 32) => crypto.randomBytes(bytes).toString('base64url');
@@ -133,13 +133,37 @@ function scryptAsync(password: string, salt: string, length = 64): Promise<Buffe
  * No external mail API or provider credentials are used by the application.
  * Delivery still depends on Supabase Auth email settings and redirect allow-list.
  */
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Queue a Supabase Auth email (magic link). Uses only Supabase Auth email/SMTP settings — no external ESP in app code. */
 async function sendSupabaseAuthLink(to: string, redirectTo: string) {
   const db = getSupabaseAdmin();
   const { error } = await db.auth.signInWithOtp({
     email: to,
     options: { emailRedirectTo: redirectTo, shouldCreateUser: false },
   });
-  if (error) throw new Error(`Supabase Auth could not queue the email link (${error.status || 'unknown'}).`);
+  if (error) {
+    const status = (error as any).status || (error as any).code || 'unknown';
+    const msg = String(error.message || 'auth_email_failed').slice(0, 200);
+    throw new Error(`Supabase Auth email queue failed (${status}): ${msg}`);
+  }
+}
+
+async function sendSupabaseAuthLinkWithRetry(to: string, redirectTo: string, attempts = 3) {
+  let lastError: Error | null = null;
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      await sendSupabaseAuthLink(to, redirectTo);
+      return { attempts: i };
+    } catch (error: any) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      console.error(`[Admin Gate] Auth email attempt ${i}/${attempts} failed:`, lastError.message);
+      if (i < attempts) await sleep(1000 * (2 ** (i - 1)));
+    }
+  }
+  throw lastError || new Error('Supabase Auth email failed');
 }
 
 async function issueMerchantActivationToken(userId: string) {
@@ -163,48 +187,103 @@ async function issueMerchantActivationToken(userId: string) {
   return { expiresAt };
 }
 
-async function deliverDailyAdminGate() {
-  const publicUrl = String(process.env.PUBLIC_APP_URL || '').replace(/\/+$/, '');
-  if (!publicUrl) throw new Error('PUBLIC_APP_URL is required for the daily admin link.');
+async function deliverDailyAdminGate(options: { forceResend?: boolean } = {}) {
+  const publicUrl = String(process.env.PUBLIC_APP_URL || process.env.APP_URL || 'https://evoweb.onrender.com').replace(/\/+$/, '');
+  if (!publicUrl.startsWith('https://')) throw new Error('PUBLIC_APP_URL must be an https URL for the admin gate.');
+  if (!ADMIN_GATE_EMAIL || !ADMIN_GATE_EMAIL.includes('@')) throw new Error('ADMIN_GATE_EMAIL is not configured.');
+
   const db = getSupabaseAdmin();
   const today = utcDateKey();
+  // Drop previous days only (hashes of expired tokens).
   await db.from('store_admin_daily_access').delete().lt('access_date', today);
-  const { data: existing, error: existingError } = await db.from('store_admin_daily_access')
-    .select('id,sent_at').eq('access_date', today).maybeSingle();
-  if (existingError) throw new Error(existingError.message || 'daily_admin_access_read_failed');
-  if (existing?.sent_at) return;
-  if (existing && !existing.sent_at) await db.from('store_admin_daily_access').delete().eq('id', existing.id);
 
-  const pathToken = randomToken(32);
-  // Legacy columns remain populated with hashes only; no daily key or QR bearer is issued.
-  const expiresAt = new Date(`${today}T23:59:59.999Z`).toISOString();
-  const { data: inserted, error: insertError } = await db.from('store_admin_daily_access').insert({
-    access_date: today,
-    path_token_hash: sha256(pathToken),
-    key_hash: sha256(randomToken(32)),
-    qr_token_hash: sha256(randomToken(32)),
-    expires_at: expiresAt,
-  }).select('id').maybeSingle();
-  if (insertError) {
-    if (String((insertError as any).code) === '23505') return;
-    throw insertError;
+  const { data: existing, error: existingError } = await db.from('store_admin_daily_access')
+    .select('id,sent_at,used_at').eq('access_date', today).maybeSingle();
+  if (existingError) throw new Error(existingError.message || 'daily_admin_access_read_failed');
+
+  // One active gate per UTC day. Do not mint duplicates on restart/cron overlap.
+  if (existing?.sent_at && !options.forceResend) {
+    console.info(`[Admin Gate] Already delivered for ${today}; skip.`);
+    return { status: 'already_sent' as const, accessDate: today };
   }
-  if (!inserted) return;
+  if (existing?.used_at) {
+    console.info(`[Admin Gate] Gate for ${today} already consumed; skip.`);
+    return { status: 'already_used' as const, accessDate: today };
+  }
+
+  let pathToken = randomToken(32);
+  let rowId: string | null = existing?.id || null;
+
+  if (!existing) {
+    const expiresAt = new Date(`${today}T23:59:59.999Z`).toISOString();
+    const { data: inserted, error: insertError } = await db.from('store_admin_daily_access').insert({
+      access_date: today,
+      path_token_hash: sha256(pathToken),
+      key_hash: sha256(randomToken(32)),
+      qr_token_hash: sha256(randomToken(32)),
+      expires_at: expiresAt,
+      send_attempts: 0,
+    }).select('id').maybeSingle();
+    if (insertError) {
+      // Concurrent cron/instance won the insert — do not create a second active token.
+      if (String((insertError as any).code) === '23505') {
+        console.info(`[Admin Gate] Concurrent insert for ${today}; skip.`);
+        return { status: 'race_skip' as const, accessDate: today };
+      }
+      throw insertError;
+    }
+    if (!inserted) return { status: 'insert_empty' as const, accessDate: today };
+    rowId = inserted.id;
+  } else if (options.forceResend) {
+    // Rotate path token hash on forced resend so old links die; still one row per day.
+    pathToken = randomToken(32);
+    const { error: rotError } = await db.from('store_admin_daily_access').update({
+      path_token_hash: sha256(pathToken),
+      key_hash: sha256(randomToken(32)),
+      qr_token_hash: sha256(randomToken(32)),
+      sent_at: null,
+      key_verified_at: null,
+      qr_verified_at: null,
+      used_at: null,
+      attempts: 0,
+      last_error: null,
+    }).eq('id', existing.id).is('used_at', null);
+    if (rotError) throw rotError;
+    rowId = existing.id;
+  } else {
+    // Row exists but email never marked sent — rotate token and retry send once.
+    pathToken = randomToken(32);
+    const { error: rotError } = await db.from('store_admin_daily_access').update({
+      path_token_hash: sha256(pathToken),
+      key_hash: sha256(randomToken(32)),
+      qr_token_hash: sha256(randomToken(32)),
+    }).eq('id', existing.id);
+    if (rotError) throw rotError;
+    rowId = existing.id;
+  }
 
   const loginUrl = `${publicUrl}/admin/${encodeURIComponent(pathToken)}`;
   try {
-    // Supabase Auth sends the actual magic-link email. The link is bound to the daily URL,
-    // and the normal server-side role check plus mandatory MFA still gate administrator access.
-    await sendSupabaseAuthLink(ADMIN_GATE_EMAIL, loginUrl);
+    const sendResult = await sendSupabaseAuthLinkWithRetry(ADMIN_GATE_EMAIL, loginUrl, 3);
     const now = new Date().toISOString();
     const { error: sentError } = await db.from('store_admin_daily_access').update({
       sent_at: now,
       key_verified_at: now,
-    }).eq('id', inserted.id);
+      send_attempts: sendResult.attempts,
+      last_error: null,
+    }).eq('id', rowId);
     if (sentError) throw sentError;
-    console.info(`[Admin Gate] Supabase Auth daily sign-in link queued for ${today}.`);
-  } catch (error) {
-    await db.from('store_admin_daily_access').delete().eq('id', inserted.id);
+    // Never log pathToken or full login URL.
+    console.info(`[Admin Gate] Auth email queued for access_date=${today} attempts=${sendResult.attempts} to_domain=${ADMIN_GATE_EMAIL.split('@')[1] || 'unknown'}`);
+    return { status: 'sent' as const, accessDate: today, attempts: sendResult.attempts };
+  } catch (error: any) {
+    const errMsg = String(error?.message || 'send_failed').slice(0, 240);
+    await db.from('store_admin_daily_access').update({
+      last_error: errMsg,
+      send_attempts: 3,
+    }).eq('id', rowId);
+    // Keep the row so cron can force-resend without flooding new rows; do not leave a usable silent token without sent_at.
+    console.error(`[Admin Gate] Delivery failed for ${today}:`, errMsg);
     throw error;
   }
 }
@@ -625,11 +704,47 @@ app.get('/api/public-config', (_req, res) => {
   // Optional external scheduler hook for hosts that sleep between requests (e.g. free Render web services).
   app.post('/api/cron/admin-daily-gate', async (req, res) => {
     const expected = String(process.env.ADMIN_GATE_CRON_SECRET || '');
-    const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (expected.length < 32 || supplied.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) return res.status(401).json({ success: false });
-    try { await deliverDailyAdminGate(); return res.json({ success: true }); }
-    catch (error: any) { console.error('[Admin Gate] Scheduled delivery failed:', error); return res.status(503).json({ success: false, message: 'Daily delivery failed; retry later.' }); }
+    if (!expected || expected.length < 16) return res.status(503).json({ success: false, message: 'ADMIN_GATE_CRON_SECRET is not configured.' });
+    const provided = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    if (!provided || provided.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected))) {
+      return res.status(401).json({ success: false, message: 'unauthorized' });
+    }
+    try {
+      const forceResend = String(req.query.force || req.body?.force || '') === '1';
+      const result = await deliverDailyAdminGate({ forceResend });
+      return res.json({ success: true, result });
+    } catch (error: any) {
+      console.error('[Admin Gate] Cron delivery error:', String(error?.message || error).slice(0, 240));
+      return res.status(502).json({ success: false, message: 'Admin gate email could not be queued. Check Supabase Auth email/SMTP settings.' });
+    }
   });
+
+  /** Authenticated diagnostic: does NOT return tokens. Requires cron secret. */
+  app.post('/api/cron/admin-gate-test', async (req, res) => {
+    const expected = String(process.env.ADMIN_GATE_CRON_SECRET || '');
+    if (!expected || expected.length < 16) return res.status(503).json({ success: false, message: 'ADMIN_GATE_CRON_SECRET is not configured.' });
+    const provided = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    if (!provided || provided.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected))) {
+      return res.status(401).json({ success: false, message: 'unauthorized' });
+    }
+    try {
+      const result = await deliverDailyAdminGate({ forceResend: true });
+      return res.json({
+        success: true,
+        result,
+        note: 'If status is sent, Supabase accepted the Auth email job. Inbox delivery still depends on Supabase Auth email/SMTP configuration.',
+        adminEmailDomain: ADMIN_GATE_EMAIL.split('@')[1] || null,
+        publicAppUrlConfigured: Boolean(process.env.PUBLIC_APP_URL || process.env.APP_URL),
+      });
+    } catch (error: any) {
+      return res.status(502).json({
+        success: false,
+        message: String(error?.message || 'test_failed').slice(0, 240),
+        hint: 'In Supabase: Authentication → Email (or SMTP Settings). Confirm email provider is working. Allow-list https://evoweb.onrender.com/** in Redirect URLs.',
+      });
+    }
+  });
+
 
   // Daily admin gate: one-time path token + emailed daily key + normal Supabase password + QR confirmation.
   app.post('/api/admin/access/verify-key', async (req, res) => {

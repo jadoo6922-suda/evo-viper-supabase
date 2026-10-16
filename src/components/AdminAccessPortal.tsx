@@ -86,7 +86,7 @@ export function AdminAccessPortal() {
             if (response.ok) { setProfile(toAdminProfile(row, data.session.user.email || ADMIN_ACCESS_EMAIL)); setView('mfa'); return; }
           }
         }
-        if (alive) { setMessage('افتح رابط تسجيل الدخول الذي أرسله Supabase إلى بريد الإدارة. لا تستخدم الرابط اليومي وحده من دون رابط البريد.'); setView('denied'); }
+        if (alive) { setMessage('يجب فتح رابط تسجيل الدخول المرسل من Supabase إلى بريد الإدارة (jadoo6922@gmail.com). بعد فتح رسالة البريد ستُعاد إلى هذه البوابة ثم يُطلب MFA. الرابط اليومي وحده لا يكفي.'); setView('denied'); }
       } catch (error: any) {
         if (alive) { setMessage(error?.message || 'تعذر التحقق من رابط الإدارة.'); setView('denied'); }
       }
