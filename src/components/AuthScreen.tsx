@@ -25,6 +25,7 @@ export const AuthScreen: React.FC = () => {
     login,
     register,
     replayIntro,
+    setActiveTab,
   } = useStore();
 
   const isAr = language === 'ar';
@@ -646,6 +647,20 @@ export const AuthScreen: React.FC = () => {
           ? 'نظام المتجر الرقمي الموحد • تشفير القيد المزدوج المالي'
           : 'DigitalStore Vault • Double-Entry Cryptographic Ledger'}
       </footer>
-    </div>
+    
+        <div className="mt-8 pt-4 border-t border-white/10 text-center text-[11px] text-white/45 space-x-2 space-x-reverse flex flex-wrap items-center justify-center gap-2">
+          <button type="button" className="hover:text-white underline-offset-2 hover:underline" onClick={() => { try { const u = new URL(window.location.href); u.searchParams.set('legal','privacy'); window.history.replaceState({},'',u.toString()); } catch {} setActiveTab('legal'); }}>
+            {isAr ? 'الخصوصية' : 'Privacy'}
+          </button>
+          <span className="text-white/20">|</span>
+          <button type="button" className="hover:text-white underline-offset-2 hover:underline" onClick={() => { try { const u = new URL(window.location.href); u.searchParams.set('legal','terms'); window.history.replaceState({},'',u.toString()); } catch {} setActiveTab('legal'); }}>
+            {isAr ? 'الشروط' : 'Terms'}
+          </button>
+          <span className="text-white/20">|</span>
+          <button type="button" className="hover:text-white underline-offset-2 hover:underline" onClick={() => { try { const u = new URL(window.location.href); u.searchParams.set('legal','kyc'); window.history.replaceState({},'',u.toString()); } catch {} setActiveTab('legal'); }}>
+            {isAr ? 'KYC' : 'KYC'}
+          </button>
+        </div>
+</div>
   );
 };

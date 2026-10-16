@@ -17,6 +17,7 @@ import { AdminDashboardView } from './views/AdminDashboardView';
 import { PublicVerifyView } from './views/PublicVerifyView';
 import { MerchantPortalView } from './views/MerchantPortalView';
 import { SupportView } from './views/SupportView';
+import { LegalView, type LegalSection } from './views/LegalView';
 import { AuthScreen } from './components/AuthScreen';
 import { AdminAccessPortal } from './components/AdminAccessPortal';
 import { BootstrapSuperAdminScreen } from './components/BootstrapSuperAdminScreen';
@@ -43,6 +44,24 @@ const MainAppContent: React.FC = () => {
       url.searchParams.delete('merchant_activation');
       window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
     }
+  }, [setActiveTab]);
+
+  const [legalSection, setLegalSection] = useState<LegalSection>(() => {
+    try {
+      const q = new URLSearchParams(window.location.search).get('legal');
+      if (q === 'terms' || q === 'kyc' || q === 'privacy') return q;
+    } catch {}
+    return 'privacy';
+  });
+
+  React.useEffect(() => {
+    try {
+      const q = new URLSearchParams(window.location.search).get('legal');
+      if (q === 'terms' || q === 'kyc' || q === 'privacy') {
+        setLegalSection(q);
+        setActiveTab('legal');
+      }
+    } catch {}
   }, [setActiveTab]);
 
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
@@ -173,6 +192,13 @@ const MainAppContent: React.FC = () => {
 
   // Mandatory Authentication: User must sign in or register before accessing the store/platform
   if (!currentUser) {
+    if (activeTab === 'legal') {
+      return (
+        <div className="min-h-screen bg-[#0b0d10] text-white">
+          <LegalView initialSection={legalSection} onClose={() => setActiveTab('store')} />
+        </div>
+      );
+    }
     return <AuthScreen />;
   }
 
@@ -239,6 +265,9 @@ const MainAppContent: React.FC = () => {
         )}
 
         {activeTab === 'profile' && <ProfileView />}
+        {activeTab === 'legal' && (
+          <LegalView initialSection={legalSection} onClose={() => setActiveTab('store')} />
+        )}
 
         {activeTab === 'merchant' && (
           <MerchantPortalView onNavigateToWallet={() => setActiveTab('wallet')} />
@@ -306,6 +335,24 @@ const MainAppContent: React.FC = () => {
               className="hover:text-[#c5a059] transition-colors cursor-pointer"
             >
               {isAr ? 'الكتالوج' : 'Catalog'}
+            </button>
+            <button
+              onClick={() => { setLegalSection('privacy'); setActiveTab('legal'); }}
+              className="hover:text-[#c5a059] transition-colors cursor-pointer"
+            >
+              {isAr ? 'الخصوصية' : 'Privacy'}
+            </button>
+            <button
+              onClick={() => { setLegalSection('terms'); setActiveTab('legal'); }}
+              className="hover:text-[#c5a059] transition-colors cursor-pointer"
+            >
+              {isAr ? 'الشروط' : 'Terms'}
+            </button>
+            <button
+              onClick={() => { setLegalSection('kyc'); setActiveTab('legal'); }}
+              className="hover:text-[#c5a059] transition-colors cursor-pointer"
+            >
+              KYC
             </button>
           </div>
 
