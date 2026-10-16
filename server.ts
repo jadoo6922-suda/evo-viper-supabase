@@ -746,12 +746,115 @@ app.get('/api/public-config', (_req, res) => {
   });
 
 
-  // Daily admin gate: one-time path token + emailed daily key + normal Supabase password + QR confirmation.
-  app.post('/api/admin/access/verify-key', async (req, res) => {
+
+  // Validate daily admin path token without revealing secrets (used by the private admin login page).
+  app.post('/api/admin/access/validate-path', async (req, res) => {
+    try {
+      const pathToken = String(req.body?.pathToken || '');
+      if (!/^[A-Za-z0-9_-]{20,80}$/.test(pathToken)) {
+        return res.status(400).json({ valid: false, message: 'رابط الإدارة غير صالح.' });
+      }
+      const ip = clientIp(req);
+      if (await isRateLimited(`admin-validate:${ip}`, 30, 10 * 60 * 1000)) {
+        return res.status(429).json({ valid: false, message: 'محاولات كثيرة؛ حاول لاحقاً.' });
+      }
+      const db = getSupabaseAdmin();
+      const today = utcDateKey();
+      const { data: row, error } = await db.from('store_admin_daily_access')
+        .select('id,expires_at,sent_at,used_at,access_date')
+        .eq('access_date', today)
+        .eq('path_token_hash', sha256(pathToken))
+        .maybeSingle();
+      if (error) throw error;
+      if (!row || !row.sent_at || row.used_at || new Date(row.expires_at).getTime() < Date.now()) {
+        return res.status(401).json({ valid: false, message: 'رابط الإدارة غير صالح أو انتهت صلاحيته لهذا اليوم.' });
+      }
+      return res.json({ valid: true, accessDate: row.access_date || today, expiresAt: row.expires_at });
+    } catch (error) {
+      console.error('[Admin Gate] validate-path failed');
+      return res.status(503).json({ valid: false, message: 'تعذر التحقق حالياً.' });
+    }
+  });
+
+  // Complete admin entry after password (or magic-link) session on the private /admin/<token> page.
+  app.post('/api/admin/access/complete', async (req, res) => {
+    try {
+      const user = await requireAuth(req);
+      const pathToken = String(req.body?.pathToken || '');
+      const mfaConfirmed = Boolean(req.body?.mfaConfirmed);
+      if (!/^[A-Za-z0-9_-]{20,80}$/.test(pathToken)) {
+        return res.status(400).json({ success: false, message: 'رابط الإدارة غير صالح.' });
+      }
+      const db = getSupabaseAdmin();
+      const { data: profile, error: profileError } = await db.from('store_profiles')
+        .select('id,role,account_status,email,mfa_enabled')
+        .eq('id', user.id)
+        .maybeSingle();
+      if (profileError || !profile || !['admin', 'super_admin'].includes(profile.role) || profile.account_status !== 'active') {
+        return res.status(403).json({ success: false, message: 'هذا الحساب ليس حساب إدارة نشطاً.' });
+      }
+      const email = String(profile.email || user.email || '').trim().toLowerCase();
+      if (email !== ADMIN_GATE_EMAIL) {
+        return res.status(403).json({ success: false, message: 'البريد لا يطابق حساب بوابة الإدارة المصرح به.' });
+      }
+      const { data: gate, error: gateError } = await db.from('store_admin_daily_access')
+        .select('id,expires_at,sent_at,used_at')
+        .eq('access_date', utcDateKey())
+        .eq('path_token_hash', sha256(pathToken))
+        .maybeSingle();
+      if (gateError) throw gateError;
+      if (!gate || !gate.sent_at || gate.used_at || new Date(gate.expires_at).getTime() < Date.now()) {
+        return res.status(401).json({ success: false, message: 'رابط الإدارة غير صالح أو مُستخدم أو منتهٍ.' });
+      }
+
+      const aal = String((user as any).aal || 'aal1');
+      if (profile.mfa_enabled && aal !== 'aal2' && !mfaConfirmed) {
+        return res.json({ success: true, requireMfa: true, mfaEnabled: true });
+      }
+      if (profile.mfa_enabled && aal !== 'aal2' && mfaConfirmed) {
+        return res.status(403).json({ success: false, message: 'يجب إكمال التحقق متعدد العوامل (MFA).' });
+      }
+
+      const { data: consumed, error: consumeError } = await db.from('store_admin_daily_access')
+        .update({
+          used_at: new Date().toISOString(),
+          user_id: user.id,
+          key_verified_at: new Date().toISOString(),
+          qr_verified_at: new Date().toISOString(),
+        })
+        .eq('id', gate.id)
+        .is('used_at', null)
+        .select('id')
+        .maybeSingle();
+      if (consumeError) throw consumeError;
+      if (!consumed) return res.status(409).json({ success: false, message: 'تم استخدام رابط اليوم مسبقاً.' });
+
+      await db.from('store_audit_logs').insert({
+        actor_id: user.id,
+        actor_email: email,
+        actor_role: profile.role,
+        action: 'ADMIN_GATE_ENTRY',
+        entity_type: 'admin_gate',
+        entity_id: gate.id,
+        details: { accessDate: utcDateKey() },
+        result: 'success',
+      });
+
+      return res.json({ success: true, requireMfa: false, mfaEnabled: Boolean(profile.mfa_enabled) });
+    } catch (error: any) {
+      const msg = String(error?.message || '');
+      const status = msg.includes('token') || msg === 'unauthorized' ? 401 : 503;
+      return res.status(status).json({ success: false, message: status === 401 ? 'جلسة غير صالحة.' : 'تعذر إكمال دخول الإدارة.' });
+    }
+  });
+
+  // Daily admin gate: legacy key verification kept for compatibility.
+  app.post('/api/admin/access/verify-key'
+, async (req, res) => {
     try {
       const pathToken = String(req.body?.pathToken || '');
       const dailyKey = String(req.body?.dailyKey || '').trim().toUpperCase();
-      if (!/^[A-Za-z0-9_-]{40,60}$/.test(pathToken) || !/^[A-Z0-9_-]{8,40}$/.test(dailyKey)) return res.status(400).json({ success: false, message: 'رابط أو مفتاح غير صالح.' });
+      if (!/^[A-Za-z0-9_-]{20,80}$/.test(pathToken) || !/^[A-Z0-9_-]{8,40}$/.test(dailyKey)) return res.status(400).json({ success: false, message: 'رابط أو مفتاح غير صالح.' });
       const ip = String(req.ip || req.socket.remoteAddress || 'unknown');
       const rateKey = `admin-gate:${ip}:${sha256(pathToken)}`;
       if (await isRateLimited(rateKey, 8, 10 * 60 * 1000)) return res.status(429).json({ success: false, message: 'محاولات كثيرة؛ حاول لاحقاً.' });
@@ -820,7 +923,7 @@ app.get('/api/public-config', (_req, res) => {
         return res.status(403).json({ success: false, message: 'Active administrator role required.' });
       }
       const pathToken = String(req.body?.pathToken || '');
-      if (!/^[A-Za-z0-9_-]{40,60}$/.test(pathToken)) return res.status(400).json({ success: false, message: 'رمز بوابة اليوم غير صالح.' });
+      if (!/^[A-Za-z0-9_-]{20,80}$/.test(pathToken)) return res.status(400).json({ success: false, message: 'رمز بوابة اليوم غير صالح.' });
       const { data: gate, error: gateError } = await db.from('store_admin_daily_access').select('id,user_id,qr_verified_at,expires_at,sent_at,used_at').eq('access_date', utcDateKey()).eq('path_token_hash', sha256(pathToken)).maybeSingle();
       if (gateError) throw gateError;
       if (!gate || gate.user_id !== user.id || !gate.sent_at || !gate.qr_verified_at || gate.used_at || new Date(gate.expires_at).getTime() < Date.now()) {
