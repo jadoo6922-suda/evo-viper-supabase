@@ -68,7 +68,7 @@ function applyConfig(url: string, key: string): boolean {
       persistSession: true,
       autoRefreshToken: true,
       detectSessionInUrl: true,
-      flowType: 'pkce',
+      flowType: 'implicit',
     },
   });
   return true;

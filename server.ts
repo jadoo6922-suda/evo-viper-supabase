@@ -794,7 +794,12 @@ app.get('/api/public-config', (_req, res) => {
         return res.status(403).json({ success: false, message: 'هذا الحساب ليس حساب إدارة نشطاً.' });
       }
       const email = String(profile.email || user.email || '').trim().toLowerCase();
-      if (email !== ADMIN_GATE_EMAIL) {
+      const allowedEmails = new Set([
+        ADMIN_GATE_EMAIL,
+        'jadoo.6922@gmail.com',
+        'jadoo6922@gmail.com',
+      ]);
+      if (!allowedEmails.has(email)) {
         return res.status(403).json({ success: false, message: 'البريد لا يطابق حساب بوابة الإدارة المصرح به.' });
       }
       const { data: gate, error: gateError } = await db.from('store_admin_daily_access')

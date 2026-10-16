@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { supabase } from '../lib/supabase';
+import { supabase, initSupabase } from '../lib/supabase';
 import { fetchOwnProfile } from '../lib/serverApi';
 import { useStore } from '../context/useStore';
 import { AdminMfaScreen } from './AdminMfaScreen';
@@ -23,12 +23,9 @@ function toAdminProfile(row: any, fallbackEmail: string): User {
   };
 }
 
-type ViewState = 'checking' | 'login' | 'mfa' | 'denied';
+type ViewState = 'checking' | 'login' | 'link_sent' | 'mfa' | 'denied';
 
-/**
- * صفحة دخول إدارة منفصلة بالكامل على /admin/<daily-token>
- * بدون توكن يومي صالح في الرابط لا تُعرض، ولا تظهر واجهة تسجيل دخول الزبائن.
- */
+/** صفحة إدارة منفصلة: الرابط اليومي + دخول بدون كلمة مرور عبر رابط البريد */
 export function AdminAccessPortal() {
   const { setCurrentUserDirectly, refreshCurrentUser, setActiveTab } = useStore();
   const pathToken = useMemo(() => {
@@ -40,6 +37,7 @@ export function AdminAccessPortal() {
   const [view, setView] = useState<ViewState>('checking');
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [password, setPassword] = useState('');
   const [profile, setProfile] = useState<User | null>(null);
   const [gateMeta, setGateMeta] = useState<{ accessDate?: string; expiresAt?: string } | null>(null);
@@ -65,12 +63,36 @@ export function AdminAccessPortal() {
     setActiveTab('admin');
   };
 
+  const trySessionEntry = async () => {
+    if (!supabase) return false;
+    const { data } = await supabase.auth.getSession();
+    if (!data.session?.access_token) return false;
+    const row = await fetchOwnProfile();
+    if (!row || !['admin', 'super_admin'].includes(row.role) || row.account_status !== 'active') return false;
+    const adminProfile = toAdminProfile(row, data.session.user.email || ADMIN_ACCESS_EMAIL);
+    try {
+      await completeEntry(data.session.access_token, adminProfile);
+      return true;
+    } catch (err: any) {
+      if (String(err?.message || '').toLowerCase().includes('mfa')) {
+        setProfile(adminProfile);
+        setView('mfa');
+        return true;
+      }
+      setMessage(err?.message || 'تعذر إكمال الدخول.');
+      return false;
+    }
+  };
+
   useEffect(() => {
     let alive = true;
+    let unsub: { unsubscribe: () => void } | null = null;
+
     const initialize = async () => {
+      await initSupabase();
       if (!pathToken) {
         if (alive) {
-          setMessage('رابط الإدارة ناقص. يجب فتح الرابط اليومي الكامل المرسل إلى بريد الإدارة.');
+          setMessage('رابط الإدارة ناقص. افتح الرابط اليومي الكامل من بريد الإدارة.');
           setView('denied');
         }
         return;
@@ -98,25 +120,19 @@ export function AdminAccessPortal() {
         }
         if (alive) setGateMeta({ accessDate: checkBody.accessDate, expiresAt: checkBody.expiresAt });
 
-        // إذا وُجدت جلسة من رابط البريد (magic link) نكمل مباشرة بعد التحقق من الدور.
-        const { data } = await supabase.auth.getSession();
-        if (data.session?.access_token) {
-          const row = await fetchOwnProfile();
-          if (row && ['admin', 'super_admin'].includes(row.role) && row.account_status === 'active') {
-            const adminProfile = toAdminProfile(row, data.session.user.email || ADMIN_ACCESS_EMAIL);
-            try {
-              await completeEntry(data.session.access_token, adminProfile);
-              return;
-            } catch (err: any) {
-              if (String(err?.message || '').toLowerCase().includes('mfa')) {
-                if (alive) { setProfile(adminProfile); setView('mfa'); }
-                return;
-              }
-              // خلاف ذلك اعرض نموذج كلمة المرور
-            }
+        // استمع لجلسة رابط البريد (magic link) وأكمل الدخول تلقائياً — بدون كلمة مرور
+        const { data: sub } = supabase.auth.onAuthStateChange(async (event, session) => {
+          if (!alive) return;
+          if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'INITIAL_SESSION') && session?.access_token) {
+            await trySessionEntry();
           }
-        }
-        if (alive) setView('login');
+        });
+        unsub = sub.subscription;
+
+        // انتظر لحظة لمعالجة هاش الرابط من الإيميل
+        await new Promise((r) => setTimeout(r, 400));
+        const entered = await trySessionEntry();
+        if (!entered && alive) setView('login');
       } catch (error: any) {
         if (alive) {
           setMessage(error?.message || 'تعذر فتح بوابة الإدارة.');
@@ -125,10 +141,38 @@ export function AdminAccessPortal() {
       }
     };
     void initialize();
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+      unsub?.unsubscribe();
+    };
   }, [pathToken]);
 
-  const login = async () => {
+  /** إرسال رابط دخول لبريد الإدارة من المتصفح (بدون كلمة مرور) */
+  const sendEmailLink = async () => {
+    await initSupabase();
+    if (!supabase || !pathToken) return;
+    setLoading(true);
+    setMessage('');
+    try {
+      const redirectTo = `${window.location.origin}/admin/${pathToken}`;
+      const { error } = await supabase.auth.signInWithOtp({
+        email: ADMIN_ACCESS_EMAIL,
+        options: {
+          emailRedirectTo: redirectTo,
+          shouldCreateUser: false,
+        },
+      });
+      if (error) throw error;
+      setView('link_sent');
+    } catch (error: any) {
+      setMessage(error?.message || 'تعذر إرسال رابط الدخول. تحقق من إعداد بريد Supabase.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loginWithPassword = async () => {
+    await initSupabase();
     if (!supabase || !pathToken || !password) return;
     setLoading(true);
     setMessage('');
@@ -138,17 +182,17 @@ export function AdminAccessPortal() {
         password,
       });
       if (error || !data.session?.access_token) {
-        throw new Error(error?.message || 'كلمة المرور غير صحيحة.');
+        throw new Error(error?.message || 'كلمة المرور غير صحيحة أو غير مُعيَّنة لهذا الحساب.');
       }
       const row = await fetchOwnProfile();
       if (!row || !['admin', 'super_admin'].includes(row.role) || row.account_status !== 'active') {
         await supabase.auth.signOut();
-        throw new Error('هذا الحساب ليس حساب إدارة نشطاً في المنصة.');
+        throw new Error('هذا الحساب ليس حساب إدارة نشطاً. نفّذ SQL لرفع الدور إلى super_admin.');
       }
       const adminProfile = toAdminProfile(row, data.user?.email || ADMIN_ACCESS_EMAIL);
       await completeEntry(data.session.access_token, adminProfile);
     } catch (error: any) {
-      setMessage(error?.message || 'تعذر تسجيل الدخول الإداري.');
+      setMessage(error?.message || 'تعذر تسجيل الدخول.');
     } finally {
       setLoading(false);
     }
@@ -159,7 +203,7 @@ export function AdminAccessPortal() {
     try {
       const { data } = await supabase.auth.getSession();
       const token = data.session?.access_token;
-      if (!token) throw new Error('انتهت الجلسة. أعد تسجيل الدخول من رابط اليوم.');
+      if (!token) throw new Error('انتهت الجلسة.');
       const response = await fetch('/api/admin/access/complete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -190,56 +234,96 @@ export function AdminAccessPortal() {
             <ShieldCheck className="h-7 w-7" />
           </div>
           <p className="mb-2 text-[10px] font-bold uppercase tracking-[.28em] text-[#d9b76d]">Private Admin Gateway</p>
-          <h1 className="text-2xl font-black tracking-tight sm:text-3xl">دخول الإدارة فقط</h1>
+          <h1 className="text-2xl font-black tracking-tight">دخول الإدارة</h1>
           <p className="mt-3 text-sm leading-6 text-white/60">
-            هذه صفحة منفصلة عن تسجيل دخول الزبائن. لا يمكن فتحها بدون الرابط اليومي السري.
+            صفحة منفصلة عن الزبائن. الدخول الأساسي عبر رابط يُرسل لبريدك — بدون الحاجة لكلمة مرور.
           </p>
           {gateMeta?.accessDate && (
-            <p className="mt-3 text-[11px] text-[#e7ce98]/80">صلاحية رابط اليوم: {gateMeta.accessDate} (UTC)</p>
+            <p className="mt-3 text-[11px] text-[#e7ce98]/80">رابط اليوم: {gateMeta.accessDate} (UTC)</p>
           )}
         </header>
 
         <div className="space-y-5 px-7 py-7">
           {view === 'checking' && (
             <div className="flex items-center justify-center gap-3 py-8 text-sm text-white/65">
-              <Loader2 className="h-5 w-5 animate-spin text-[#d9b76d]" /> جارٍ التحقق من رابط الإدارة...
+              <Loader2 className="h-5 w-5 animate-spin text-[#d9b76d]" /> جارٍ التحقق...
             </div>
           )}
 
           {view === 'login' && (
             <>
-              <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-                <p className="text-sm font-bold flex items-center gap-2"><KeyRound className="h-4 w-4 text-[#d9b76d]" /> حساب الإدارة</p>
+              <div className="rounded-2xl border border-emerald-400/15 bg-emerald-950/20 p-4">
+                <p className="text-sm font-bold text-emerald-100">الطريقة الموصى بها (بدون كلمة مرور)</p>
+                <p className="mt-2 text-xs leading-6 text-white/55">
+                  اضغط الزر ليُرسل Supabase رابط دخول لمرة واحدة إلى:
+                </p>
                 <p className="mt-2 break-all font-mono text-sm text-[#e7ce98]">{ADMIN_ACCESS_EMAIL}</p>
-                <p className="mt-2 text-xs leading-5 text-white/50">أدخل كلمة مرور حساب الإدارة. لن تُعرض هذه الصفحة للعامة بدون التوكن اليومي في الرابط.</p>
               </div>
-              <label className="block text-xs text-white/65">
-                كلمة المرور
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  autoComplete="current-password"
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3.5 text-white"
-                  onKeyDown={(e) => { if (e.key === 'Enter') void login(); }}
-                />
-              </label>
               <button
                 type="button"
-                onClick={() => void login()}
-                disabled={loading || !password}
+                onClick={() => void sendEmailLink()}
+                disabled={loading}
                 className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-l from-[#8c172d] to-[#4b0d1b] px-4 py-4 text-sm font-bold disabled:opacity-50"
               >
-                {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : <><LockKeyhole className="h-4 w-4" /> دخول لوحة الإدارة</>}
+                {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : <><Mail className="h-4 w-4" /> أرسل رابط الدخول لبريدي</>}
               </button>
+
+              <button
+                type="button"
+                className="w-full text-center text-xs text-white/45 underline-offset-2 hover:text-white/70 hover:underline"
+                onClick={() => setShowPassword((v) => !v)}
+              >
+                {showPassword ? 'إخفاء الدخول بكلمة المرور' : 'لدي كلمة مرور وأريد استخدامها (اختياري)'}
+              </button>
+
+              {showPassword && (
+                <>
+                  <label className="block text-xs text-white/65">
+                    كلمة مرور حساب الإدارة (إن كانت مُعيَّنة)
+                    <input
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      className="mt-2 w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3.5 text-white"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => void loginWithPassword()}
+                    disabled={loading || !password}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-sm font-bold disabled:opacity-50"
+                  >
+                    <LockKeyhole className="h-4 w-4" /> دخول بكلمة المرور
+                  </button>
+                </>
+              )}
             </>
+          )}
+
+          {view === 'link_sent' && (
+            <div className="rounded-2xl border border-emerald-400/20 bg-emerald-950/20 p-5">
+              <Mail className="mb-3 h-7 w-7 text-emerald-300" />
+              <h2 className="font-bold">تم إرسال رابط الدخول</h2>
+              <p className="mt-2 text-sm leading-6 text-white/70">
+                افتح بريد <span className="text-[#e7ce98]">{ADMIN_ACCESS_EMAIL}</span> واضغط رابط الدخول.
+                سيعيدك لنفس هذه الصفحة ثم تدخل لوحة الإدارة تلقائياً.
+              </p>
+              <p className="mt-3 text-xs text-white/45">تحقق أيضاً من البريد المهمل (Spam).</p>
+              <button
+                type="button"
+                className="mt-4 text-xs text-[#e7ce98] underline"
+                onClick={() => setView('login')}
+              >
+                إعادة الإرسال
+              </button>
+            </div>
           )}
 
           {view === 'denied' && (
             <div role="alert" className="rounded-2xl border border-red-400/20 bg-red-950/20 p-5">
               <AlertCircle className="mb-3 h-7 w-7 text-red-300" />
               <h2 className="font-bold">تعذر فتح بوابة الإدارة</h2>
-              <p className="mt-2 text-sm leading-6 text-white/70">{message || 'الرابط غير صالح أو انتهت صلاحيته.'}</p>
+              <p className="mt-2 text-sm leading-6 text-white/70">{message || 'الرابط غير صالح.'}</p>
             </div>
           )}
 
@@ -248,8 +332,11 @@ export function AdminAccessPortal() {
           )}
 
           <div className="flex items-start gap-2 border-t border-white/10 pt-4 text-[10px] leading-5 text-white/35">
-            <Mail className="mt-0.5 h-4 w-4 shrink-0 text-[#c5a059]/70" />
-            <p>هذه البوابة منفصلة عن متجر الزبائن. الرابط يتغير يومياً. لا تشارك الرابط مع أحد.</p>
+            <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-[#c5a059]/70" />
+            <p>
+              لا نرسل كلمة مرور في الإيميل لأسباب أمنية. الرابط اليومي + رابط الدخول لمرة واحدة كافيان.
+              كلمة المرور اختيارية فقط إذا كنت عيّنتها مسبقاً على الحساب.
+            </p>
           </div>
         </div>
       </div>
