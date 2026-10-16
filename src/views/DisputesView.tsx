@@ -66,23 +66,19 @@ export const DisputesView: React.FC = () => {
     setIsUploading(true);
     setCreateStatus({});
 
-    // Simulated evidence file
+    // Evidence metadata only — never invent remote image URLs or OCR from mock bytes.
     const evidenceFiles = evidenceFileName
       ? [
           {
-            id: 'EV-' + Math.floor(100 + Math.random() * 900),
+            id: 'EV-LOCAL-' + Date.now(),
             name: evidenceFileName,
-            url: 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=600&auto=format&fit=crop&q=80',
-            size: '1.4 MB',
+            url: '',
+            size: 'local',
             uploadedAt: new Date().toISOString(),
+            pendingServerUpload: true,
           },
         ]
       : [];
-
-    const mockFile = new File(['mock'], evidenceFileName || 'transfer_receipt.png', {
-      type: 'image/png',
-    });
-    const ocrResult = await verifyProofImage(mockFile, targetTxId);
 
     const res = await openDispute({
       transactionId: targetTxId.trim().toUpperCase(),
@@ -90,14 +86,7 @@ export const DisputesView: React.FC = () => {
       reasonLabel: isAr ? reasonLabels[reason].ar : reasonLabels[reason].en,
       description: customDesc,
       evidenceFiles,
-      ocrVerification: {
-        extractedAmount: ocrResult.extractedAmount,
-        extractedDate: ocrResult.extractedDate,
-        extractedRef: ocrResult.extractedRef,
-        matchStatus: ocrResult.matchStatus,
-        confidence: ocrResult.confidence,
-        notes: ocrResult.notes,
-      },
+      ocrVerification: null,
     });
 
     setIsUploading(false);

@@ -20,6 +20,44 @@ export function computeRealHmac(txId: string, amount: number | string): string {
   return crypto.createHmac('sha256', getHmacSecret()).update(`${txId}:${normalizedAmount}`).digest('hex');
 }
 
+/** Money with at most 2 decimal places (avoids float false rejects like 19.99). */
+function isValidMoneyAmount(value: unknown, min = 0.01, max = 50000): value is number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n) || n < min || n > max) return false;
+  const cents = Math.round(n * 100);
+  return Math.abs(cents / 100 - n) < 1e-9;
+}
+
+function clientIp(req: express.Request): string {
+  const cf = req.headers['cf-connecting-ip'];
+  if (typeof cf === 'string' && cf.trim()) return cf.trim();
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.length) return xff.split(',')[0].trim();
+  return String(req.ip || req.socket.remoteAddress || 'unknown');
+}
+
+const SENSITIVE_PERMISSIONS = new Set([
+  'wallet_adjust',
+  'manage_escrow_settings',
+  'manage_emergency',
+  'manage_roles',
+  'manage_users',
+  'merchant_manager',
+  'manage_products',
+  'manage_disputes',
+  'manage_reports',
+]);
+
+const CLIENT_AUDIT_ALLOWLIST = new Set([
+  'USER_LOGIN',
+  'USER_LOGOUT',
+  'PROFILE_VIEW',
+  'CATALOG_VIEW',
+  'SUPPORT_MESSAGE_SENT',
+]);
+
+
+
 // Server-only Supabase client. The service-role key must never use a VITE_ prefix.
 let supabaseAdmin: SupabaseClient | null = null;
 function getSupabaseAdmin(): SupabaseClient {
@@ -56,7 +94,7 @@ async function verifySupabaseToken(token: string) {
 }
 
 
-const ADMIN_GATE_EMAIL = 'maybepq22@gmail.com';
+const ADMIN_GATE_EMAIL = String(process.env.ADMIN_GATE_EMAIL || process.env.ADMIN_EMAIL || 'maybepq22@gmail.com').trim().toLowerCase();
 const sha256 = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const utcDateKey = (date = new Date()) => date.toISOString().slice(0, 10);
 const randomToken = (bytes = 32) => crypto.randomBytes(bytes).toString('base64url');
@@ -226,6 +264,24 @@ async function startServer() {
 
   // Behind Render / Cloudflare / reverse proxies, trust X-Forwarded-* for rate limits and secure cookies.
   app.set('trust proxy', 1);
+  app.disable('x-powered-by');
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    if (process.env.NODE_ENV === 'production') {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    // Baseline CSP — API JSON is same-origin; tighten further at CDN if needed.
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; script-src 'self'; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://generativelanguage.googleapis.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+    );
+    next();
+  });
 
   // Liveness for host health checks — no secrets required.
   app.get('/api/health', (_req, res) => {
@@ -246,32 +302,6 @@ async function startServer() {
 
   // Public browser config only (anon/publishable). Never returns service_role / sb_secret_*.
   
-  // Temporary diagnostics (no secrets). Remove after login is stable.
-  app.get('/api/debug/db-check', async (_req, res) => {
-    const out: Record<string, unknown> = {
-      supabaseUrlHost: (() => {
-        try { return new URL(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').host; } catch { return null; }
-      })(),
-      hasServiceRole: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
-      hasAnon: Boolean(process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY),
-    };
-    try {
-      const db = getSupabaseAdmin();
-      const profiles = await db.from('store_profiles').select('id', { count: 'exact', head: true });
-      out.store_profiles = profiles.error ? { ok: false, error: profiles.error.message, code: profiles.error.code } : { ok: true, count: profiles.count };
-      const wallets = await db.from('store_wallets').select('user_id', { count: 'exact', head: true });
-      out.store_wallets = wallets.error ? { ok: false, error: wallets.error.message, code: wallets.error.code } : { ok: true, count: wallets.count };
-      const security = await db.from('store_security_profiles').select('user_id', { count: 'exact', head: true });
-      out.store_security_profiles = security.error ? { ok: false, error: security.error.message, code: security.error.code } : { ok: true, count: security.count };
-      // Auth admin smoke: list 1 user (proves service role works)
-      const authList = await db.auth.admin.listUsers({ page: 1, perPage: 1 });
-      out.authAdmin = authList.error ? { ok: false, error: authList.error.message } : { ok: true, usersSample: authList.data?.users?.length ?? 0 };
-    } catch (e: any) {
-      out.fatal = String(e?.message || e);
-    }
-    res.set('Cache-Control', 'no-store');
-    return res.json(out);
-  });
 
 app.get('/api/public-config', (_req, res) => {
     const url = String(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim().replace(/\/$/, '');
@@ -297,7 +327,7 @@ app.get('/api/public-config', (_req, res) => {
   // Render and other hosts inject PORT. Keep 3000 as the local-development fallback.
   const PORT = Number.parseInt(process.env.PORT || '3000', 10);
 
-  app.use(express.json({ limit: '20mb' }));
+  app.use(express.json({ limit: '256kb' }));
 
   const allowedOrigins = new Set(
     [process.env.PUBLIC_APP_URL, process.env.APP_URL]
@@ -423,7 +453,7 @@ app.get('/api/public-config', (_req, res) => {
         const isParticipant = targetTx.user_id === requester.id || targetTx.counterparty_user_id === requester.id;
         if (!isParticipant) {
           const { data: requesterProfile } = await getSupabaseAdmin().from('store_profiles').select('role,account_status,mfa_enabled').eq('id', requester.id).maybeSingle();
-          const isAdmin = requesterProfile && ['admin', 'super_admin'].includes(requesterProfile.role) && requesterProfile.account_status === 'active' && (!requesterProfile.mfa_enabled || requester.aal === 'aal2');
+          const isAdmin = Boolean(requesterProfile && ['admin', 'super_admin'].includes(requesterProfile.role) && requesterProfile.account_status === 'active' && requester.aal === 'aal2');
           if (!isAdmin) return res.status(403).json({ error: 'not authorized to inspect this transaction' });
         }
       }
@@ -486,10 +516,7 @@ app.get('/api/public-config', (_req, res) => {
 
   // 3. Lightweight IP discovery endpoint
   app.get('/api/my-ip', (req, res) => {
-    const realIp = ((req.headers['x-forwarded-for'] as string) || req.ip || req.socket.remoteAddress || 'unknown')
-      .split(',')[0]
-      .trim();
-    res.json({ ip: realIp });
+    res.json({ ip: clientIp(req) });
   });
 
   // 4. Real IP Audit Logging (Strictly authenticated, whitelisted actions)
@@ -500,26 +527,29 @@ app.get('/api/public-config', (_req, res) => {
         return res.status(401).json({ error: 'unauthorized' });
       }
       const decoded = await verifySupabaseToken(idToken);
+      if (await isRateLimited(`audit-log:${decoded.id}`, 30, 10 * 60 * 1000)) {
+        return res.status(429).json({ error: 'rate limited' });
+      }
 
-      const ALLOWED_ACTIONS = ['USER_LOGIN', 'USER_LOGOUT', 'PROFILE_UPDATE', 'SUSPICIOUS_ACTIVITY', 'DISPUTE_OPENED', 'DISPUTE_STATUS_CHANGE', 'EMERGENCY_SETTINGS_CHANGE', 'P2P_TRANSFER', 'PRODUCT_PURCHASE', 'SIGNED_DOWNLOAD_GENERATED', 'USER_STATUS_CHANGE', 'PRODUCT_CREATE', 'PRODUCT_UPDATE', 'WALLET_ADJUST_CREDIT', 'WALLET_ADJUST_DEBIT'];
+      // Client may only report low-risk UX events. Privileged actions are server-written only.
+      const ALLOWED_ACTIONS = Array.from(CLIENT_AUDIT_ALLOWLIST);
       const { action, target, metadata } = req.body || {};
       if (!ALLOWED_ACTIONS.includes(action)) {
         return res.status(400).json({ error: 'invalid action' });
       }
-      if (JSON.stringify(metadata || {}).length > 2000) {
+      if (JSON.stringify(metadata || {}).length > 1000) {
         return res.status(400).json({ error: 'metadata too large' });
       }
 
-      const realIp = ((req.headers['x-forwarded-for'] as string) || req.ip || req.socket.remoteAddress || 'unknown')
-        .split(',')[0]
-        .trim();
-      const userAgent = req.headers['user-agent'] || 'unknown';
+      const realIp = clientIp(req);
+      const userAgent = String(req.headers['user-agent'] || 'unknown').slice(0, 300);
 
-      const { data: profile } = await getSupabaseAdmin().from('store_profiles').select('role').eq('id', decoded.id).maybeSingle();
+      const { data: profile } = await getSupabaseAdmin().from('store_profiles').select('role,account_status').eq('id', decoded.id).maybeSingle();
+      if (!profile || profile.account_status !== 'active') return res.status(403).json({ error: 'account inactive' });
       const logPayload = {
         actor_id: decoded.id, actor_email: decoded.email || 'unknown', actor_role: profile?.role || 'user',
-        action, entity_type: 'audit_event', entity_id: String(target || 'system'), ip_address: realIp,
-        user_agent: String(userAgent), details: metadata || {}, metadata: { target: target || 'system' }, result: 'success',
+        action, entity_type: 'audit_event', entity_id: String(target || 'system').slice(0, 120), ip_address: realIp,
+        user_agent: String(userAgent), details: metadata || {}, metadata: { target: target || 'system', clientReported: true }, result: 'success',
       };
       const { data: savedLog, error: logError } = await getSupabaseAdmin().from('store_audit_logs').insert(logPayload).select('id,action,actor_id,actor_email,actor_role,ip_address,created_at,result').single();
       if (logError) console.warn('Could not write audit log to Supabase:', logError.message);
@@ -1104,15 +1134,23 @@ app.get('/api/public-config', (_req, res) => {
   app.post('/api/admin/escrow-threshold', async (req, res) => {
     try {
       const actor = await requireAuth(req);
+      await requirePermission(actor.id, (actor as any).aal, 'manage_escrow_settings');
       const threshold = Number(req.body?.threshold);
-      if (!Number.isFinite(threshold) || threshold < 1 || threshold > 50000 || Math.round(threshold * 100) !== threshold * 100) return res.status(400).json({ success: false, message: 'قيمة الحد غير صالحة.' });
+      if (!isValidMoneyAmount(threshold, 1, 50000)) return res.status(400).json({ success: false, message: 'قيمة الحد غير صالحة.' });
       const db = getSupabaseAdmin();
-      const { data: profile } = await db.from('store_profiles').select('role,account_status,mfa_enabled').eq('id', actor.id).maybeSingle();
-      if (!profile || profile.account_status !== 'active' || !['admin', 'super_admin'].includes(profile.role) || (profile.mfa_enabled && (actor as any).aal !== 'aal2')) return res.status(403).json({ success: false, message: 'غير مصرح أو يلزم إكمال MFA.' });
-      const { error } = await db.from('store_platform_settings').upsert({ key: 'escrow', value: { threshold }, updated_by: actor.id, updated_at: new Date().toISOString() }, { onConflict: 'key' });
-      if (error) throw error;
+      const { error } = await db.from('store_platform_settings').upsert({ key: 'escrow_threshold', value: threshold, updated_at: new Date().toISOString(), updated_by: actor.id }, { onConflict: 'key' });
+      if (error) {
+        // fallback generic settings table names
+        const { error: e2 } = await db.from('store_settings').upsert({ key: 'escrow', value: { threshold }, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+        if (e2) throw error;
+      }
+      await db.from('store_audit_logs').insert({ actor_id: actor.id, actor_email: actor.email, actor_role: 'admin', action: 'ESCROW_THRESHOLD_CHANGE', entity_type: 'settings', entity_id: 'escrow', details: { threshold }, result: 'success' });
       return res.json({ success: true, threshold });
-    } catch { return res.status(400).json({ success: false, message: 'تعذر تحديث إعدادات الضمان.' }); }
+    } catch (err: any) {
+      const msg = String(err?.message || '');
+      const status = msg === 'mfa_required' ? 403 : msg === 'forbidden' ? 403 : msg === 'unauthorized' || msg.includes('token') ? 401 : 400;
+      return res.status(status).json({ success: false, message: status === 403 ? 'صلاحية أو MFA مطلوبة.' : 'تعذر تحديث حد الضمان.' });
+    }
   });
 
   app.post('/api/orders/:orderId/confirm-delivery', async (req, res) => {
@@ -1154,7 +1192,8 @@ app.get('/api/public-config', (_req, res) => {
       if (order.escrow_status !== 'held' || !['paid', 'processing', 'completed'].includes(order.status)) return res.status(400).json({ success: false, message: 'هذا الطلب ليس في حالة ضمان قابلة للنزاع.' });
       const { data: dispute, error: disputeError } = await db.from('store_disputes').insert({ order_id: orderId, transaction_id: null, opened_by: user.id, buyer_id: order.user_id, seller_id: order.seller_id, reason, description: reason, reporter_name: user.email || 'User', respondent_name: user.id === order.user_id ? 'Seller' : 'Buyer', reason_label: 'delivery_dispute', amount: order.amount, status: 'open' }).select('id').single();
       if (disputeError) throw disputeError;
-      const { error: orderError } = await db.from('store_orders').update({ status: 'disputed', escrow_status: 'disputed', dispute_id: dispute.id, disputed_at: new Date().toISOString() }).eq('id', orderId);
+      const { data: orderLocked, error: orderError } = await db.from('store_orders').update({ status: 'disputed', escrow_status: 'disputed', dispute_id: dispute.id, disputed_at: new Date().toISOString() }).eq('id', orderId).in('escrow_status', ['held', 'pending']).select('id').maybeSingle();
+      if (!orderError && !orderLocked) { await db.from('store_disputes').delete().eq('id', dispute.id); return res.status(409).json({ success: false, message: 'تعذر فتح النزاع: حالة الضمان لم تعد تسمح بذلك.' }); }
       if (orderError) throw orderError;
       await db.from('store_escrow_holds').update({ status: 'disputed' }).eq('order_id', orderId).eq('status', 'held');
       return res.json({ success: true, disputeId: dispute.id });
@@ -1238,7 +1277,7 @@ app.get('/api/public-config', (_req, res) => {
       const title = String(p.title || p.name || '').trim().slice(0, 160);
       const description = String(p.description || '').trim().slice(0, 10000);
       const price = Number(p.price);
-      if (!title || description.length < 10 || !Number.isFinite(price) || price <= 0 || price > 50000 || Math.round(price * 100) !== price * 100) return res.status(400).json({ success: false, message: 'بيانات المنتج غير صالحة.' });
+      if (!title || description.length < 10 || !isValidMoneyAmount(price, 0.01, 50000)) return res.status(400).json({ success: false, message: 'بيانات المنتج غير صالحة.' });
       const db = getSupabaseAdmin();
       const { data: profile } = await db.from('store_profiles').select('role,account_status,merchant_activated_at,merchant_license_revoked_at').eq('id', user.id).maybeSingle();
       if (!profile || profile.role !== 'merchant' || profile.account_status !== 'active' || !profile.merchant_activated_at || profile.merchant_license_revoked_at) return res.status(403).json({ success: false, message: 'يجب أن يكون حساب التاجر مفعلاً ورخصته سارية.' });
@@ -1312,7 +1351,9 @@ app.get('/api/public-config', (_req, res) => {
   async function requirePermission(userId: string, aal: string = 'aal1', permission: string = 'dashboard') {
     const { data: profile, error } = await getSupabaseAdmin().from('store_profiles').select('role,account_status,mfa_enabled').eq('id', userId).maybeSingle();
     if (error || !profile || profile.account_status !== 'active' || !ADMIN_ROLE_PERMISSIONS[profile.role]?.includes(permission)) throw new Error('forbidden');
-    if (['admin', 'super_admin'].includes(profile.role) && aal !== 'aal2') throw new Error('mfa_required');
+    const staffRoles = ['admin', 'super_admin', 'finance', 'product_manager', 'moderator', 'support'];
+    const needsMfa = staffRoles.includes(profile.role) && (SENSITIVE_PERMISSIONS.has(permission) || ['admin', 'super_admin', 'finance'].includes(profile.role));
+    if (needsMfa && aal !== 'aal2') throw new Error('mfa_required');
     return profile;
   }
 
@@ -1336,7 +1377,13 @@ app.get('/api/public-config', (_req, res) => {
       const cutoff = new Date().toISOString();
       const { error: revokeError } = await db.from('store_security_profiles').upsert({ user_id: targetUserId, session_revoked_at: cutoff, updated_at: cutoff }, { onConflict: 'user_id' });
       if (revokeError) throw revokeError;
-      await db.from('store_audit_logs').insert({ actor_id: actor.id, actor_email: actor.email, actor_role: actorProfile.role, action: 'USER_SESSIONS_REVOKED', entity_type: 'user', entity_id: targetUserId, details: { targetEmail: target.email || null, revokedAt: cutoff }, result: 'success' });
+      // Invalidate refresh tokens at the Auth provider (cutoff alone is not enough).
+      try {
+        await db.auth.admin.signOut(targetUserId, 'global');
+      } catch (signOutErr: any) {
+        console.warn('[revoke-sessions] auth.admin.signOut failed:', signOutErr?.message || signOutErr);
+      }
+      await db.from('store_audit_logs').insert({ actor_id: actor.id, actor_email: actor.email, actor_role: actorProfile.role, action: 'USER_SESSIONS_REVOKED', entity_type: 'user', entity_id: targetUserId, details: { targetEmail: target.email || null, revokedAt: cutoff, authSignOut: true }, result: 'success' });
       return res.json({ success: true, revokedAt: cutoff, message: 'تم إبطال الجلسات السابقة. سيُطلب من الحساب تسجيل الدخول مجدداً عند الطلب التالي.' });
     } catch (error: any) {
       const message = String(error?.message || '');
@@ -1435,7 +1482,9 @@ app.get('/api/public-config', (_req, res) => {
     try {
       const actor = await requireAuth(req); const actorProfile = await requirePermission(actor.id, (actor as any).aal, 'wallet_adjust');
       const targetUserId = String(req.body?.targetUserId || ''); const amount = Number(req.body?.amount); const entryType = String(req.body?.type || ''); const reason = String(req.body?.reason || '').trim().slice(0, 300); const requestId = String(req.body?.clientRequestId || '');
-      if (!/^[0-9a-f-]{36}$/i.test(targetUserId) || !Number.isFinite(amount) || amount <= 0 || amount > 50000 || Math.round(amount * 100) !== amount * 100 || !['credit', 'debit'].includes(entryType) || reason.length < 3 || requestId.length < 8) return res.status(400).json({ success: false, message: 'بيانات تعديل الرصيد غير صالحة.' });
+      if (!/^[0-9a-f-]{36}$/i.test(targetUserId) || !isValidMoneyAmount(amount, 0.01, 5000) || !['credit', 'debit'].includes(entryType) || reason.length < 3 || requestId.length < 8 || requestId.length > 160) return res.status(400).json({ success: false, message: 'بيانات تعديل الرصيد غير صالحة.' });
+      if (targetUserId === actor.id && entryType === 'credit') return res.status(403).json({ success: false, message: 'لا يمكن إضافة رصيد إلى حسابك مباشرة.' });
+      if (actorProfile.role === 'finance' && amount > 2000) return res.status(403).json({ success: false, message: 'تجاوز سقف تعديل دور المالية لهذا الطلب.' });
       const txId = crypto.randomUUID(); const ledgerId = crypto.randomUUID(); const reference = 'ADJ-' + crypto.randomBytes(6).toString('hex').toUpperCase();
       const { data, error } = await getSupabaseAdmin().rpc('store_admin_adjust_wallet_service', { p_actor_id: actor.id, p_target_id: targetUserId, p_amount: amount, p_entry_type: entryType, p_reason: reason, p_request_id: requestId, p_tx_id: txId, p_ledger_id: ledgerId, p_reference: reference, p_security_hash: computeRealHmac(txId, amount) });
       if (error) { console.warn('Admin wallet adjustment rejected:', error.message); return res.status(400).json({ success: false, message: 'تعذر تعديل الرصيد؛ تحقق من الرصيد والصلاحيات.' }); }
@@ -1611,7 +1660,7 @@ app.get('/api/public-config', (_req, res) => {
       const description = String(p.description || '').trim().slice(0, 10000);
       const price = Number(p.price);
       const category = String(p.category || 'development');
-      if (!title || !Number.isFinite(price) || price <= 0 || price > 50000 || Math.round(price * 100) !== price * 100) return res.status(400).json({ success: false, message: 'عنوان المنتج أو سعره غير صالح.' });
+      if (!title || !isValidMoneyAmount(price, 0.01, 50000)) return res.status(400).json({ success: false, message: 'عنوان المنتج أو سعره غير صالح.' });
       const statusMap: Record<string, string> = { published: 'published', draft: 'draft', pending_review: 'pending', pending: 'pending', archived: 'archived', rejected: 'rejected' };
       const status = statusMap[String(p.status || 'published')] || 'draft';
       const productId = /^[0-9a-f-]{36}$/i.test(String(p.id || '')) ? String(p.id) : crypto.randomUUID();
@@ -1778,7 +1827,7 @@ app.get('/api/public-config', (_req, res) => {
       const description = String(req.body?.description || '').trim().slice(0, 240);
       const pin = String(req.body?.pin || '');
       const requestId = String(req.body?.clientRequestId || '');
-      if (!recipientInput || recipientInput.length > 200 || !Number.isFinite(amount) || amount <= 0 || amount > 50000 || Math.round(amount * 100) !== amount * 100 || !/^\d{4,6}$/.test(pin) || requestId.length < 8 || requestId.length > 160) {
+      if (!recipientInput || recipientInput.length > 200 || !isValidMoneyAmount(amount, 0.01, 50000) || !/^\d{4,6}$/.test(pin) || requestId.length < 8 || requestId.length > 160) {
         return res.status(400).json({ success: false, message: 'بيانات التحويل غير صالحة.' });
       }
       const db = getSupabaseAdmin();
