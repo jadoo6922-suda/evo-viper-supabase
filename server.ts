@@ -3,7 +3,6 @@ import path from 'path';
 import crypto from 'crypto';
 import { GoogleGenAI } from '@google/genai';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import QRCode from 'qrcode';
 
 /** Lazy HMAC secret — missing value fails only receipt/signing routes, not process boot /health. */
 function getHmacSecret(): string {
@@ -94,7 +93,7 @@ async function verifySupabaseToken(token: string) {
 }
 
 
-const ADMIN_GATE_EMAIL = String(process.env.ADMIN_GATE_EMAIL || process.env.ADMIN_EMAIL || 'maybepq22@gmail.com').trim().toLowerCase();
+const ADMIN_GATE_EMAIL = 'jadoo6922@gmail.com';
 const sha256 = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const utcDateKey = (date = new Date()) => date.toISOString().slice(0, 10);
 const randomToken = (bytes = 32) => crypto.randomBytes(bytes).toString('base64url');
@@ -130,15 +129,17 @@ function scryptAsync(password: string, salt: string, length = 64): Promise<Buffe
   return new Promise((resolve, reject) => crypto.scrypt(password, salt, length, (error, key) => error ? reject(error) : resolve(key)));
 }
 
-async function sendResendHtmlEmail(to: string, subject: string, html: string) {
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.ADMIN_EMAIL_FROM;
-  if (!apiKey || !from) throw new Error('RESEND_API_KEY and ADMIN_EMAIL_FROM are required for email delivery.');
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from, to: [to], subject, html }),
+/** Send a Supabase Auth magic link using the project's configured Auth email delivery.
+ * No external mail API or provider credentials are used by the application.
+ * Delivery still depends on Supabase Auth email settings and redirect allow-list.
+ */
+async function sendSupabaseAuthLink(to: string, redirectTo: string) {
+  const db = getSupabaseAdmin();
+  const { error } = await db.auth.signInWithOtp({
+    email: to,
+    options: { emailRedirectTo: redirectTo, shouldCreateUser: false },
   });
-  if (!response.ok) throw new Error(`Email provider rejected the message (${response.status}).`);
+  if (error) throw new Error(`Supabase Auth could not queue the email link (${error.status || 'unknown'}).`);
 }
 
 async function issueMerchantActivationToken(userId: string) {
@@ -156,77 +157,52 @@ async function issueMerchantActivationToken(userId: string) {
   const { error } = await db.from('store_merchant_activation_tokens').insert({ user_id: userId, token_hash: sha256(rawToken), expires_at: expiresAt });
   if (error) throw error;
   const appUrl = String(process.env.PUBLIC_APP_URL || '').replace(/\/+$/, '');
-  const html = `<div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;line-height:1.7;color:#172033"><h2>تفعيل حساب التاجر</h2><p>مرحباً ${String(profile.display_name || 'التاجر').replace(/[&<>"']/g, '')}،</p><p>رمز التفعيل صالح لمدة 30 دقيقة ويُستخدم مرة واحدة:</p><p style="font-family:monospace;font-size:20px;background:#f3f4f6;padding:12px;word-break:break-all">${rawToken}</p><p>انسخ الرمز إلى قسم التفعيل داخل موقعك. لا تشاركه مع أي شخص.</p>${appUrl ? `<p><a href="${appUrl}/?merchant_activation=1">فتح بوابة التاجر</a></p>` : ''}<p style="font-size:12px;color:#64748b">إذا لم تطلب التفعيل، تجاهل هذه الرسالة.</p></div>`;
-  await sendResendHtmlEmail(profile.email, 'رمز تفعيل حساب التاجر', html);
+  if (!appUrl) throw new Error('PUBLIC_APP_URL is required for merchant activation email.');
+  const activationUrl = `${appUrl}/?merchant_activation=1&activation_token=${encodeURIComponent(rawToken)}`;
+  await sendSupabaseAuthLink(profile.email, activationUrl);
   return { expiresAt };
-}
-
-async function sendAdminGateEmail(to: string, subject: string, html: string, qrDataUrl: string) {
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.ADMIN_EMAIL_FROM;
-  if (!apiKey || !from) throw new Error('RESEND_API_KEY and ADMIN_EMAIL_FROM are required for daily admin email delivery.');
-  const base64 = qrDataUrl.split(',')[1];
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      from, to: [to], subject, html,
-      attachments: [{ filename: 'admin-daily-qr.png', content: base64, content_type: 'image/png' }],
-    }),
-  });
-  if (!response.ok) throw new Error(`Email provider rejected the daily admin message (${response.status}).`);
 }
 
 async function deliverDailyAdminGate() {
   const publicUrl = String(process.env.PUBLIC_APP_URL || '').replace(/\/+$/, '');
+  if (!publicUrl) throw new Error('PUBLIC_APP_URL is required for the daily admin link.');
   const db = getSupabaseAdmin();
   const today = utcDateKey();
-  // Expired daily tokens are removed even if the mail provider is temporarily misconfigured.
   await db.from('store_admin_daily_access').delete().lt('access_date', today);
-  if (!publicUrl || !process.env.RESEND_API_KEY || !process.env.ADMIN_EMAIL_FROM) {
-    throw new Error('Daily admin email is not configured: set PUBLIC_APP_URL, RESEND_API_KEY, and ADMIN_EMAIL_FROM.');
-  }
-  const { data: existing, error: existingError } = await db.from('store_admin_daily_access').select('id,sent_at').eq('access_date', today).maybeSingle();
-  if (existingError) throw new Error(existingError.message || 'store_profiles_read_failed');
+  const { data: existing, error: existingError } = await db.from('store_admin_daily_access')
+    .select('id,sent_at').eq('access_date', today).maybeSingle();
+  if (existingError) throw new Error(existingError.message || 'daily_admin_access_read_failed');
   if (existing?.sent_at) return;
-  // Recover safely if the process died after reserving today's row but before sending mail.
   if (existing && !existing.sent_at) await db.from('store_admin_daily_access').delete().eq('id', existing.id);
+
   const pathToken = randomToken(32);
-  const dailyKey = randomToken(9).toUpperCase();
-  const qrToken = randomToken(32);
+  // Legacy columns remain populated with hashes only; no daily key or QR bearer is issued.
   const expiresAt = new Date(`${today}T23:59:59.999Z`).toISOString();
   const { data: inserted, error: insertError } = await db.from('store_admin_daily_access').insert({
     access_date: today,
     path_token_hash: sha256(pathToken),
-    key_hash: sha256(dailyKey),
-    qr_token_hash: sha256(qrToken),
+    key_hash: sha256(randomToken(32)),
+    qr_token_hash: sha256(randomToken(32)),
     expires_at: expiresAt,
   }).select('id').maybeSingle();
   if (insertError) {
-    // A concurrent server instance may already have generated today's row.
     if (String((insertError as any).code) === '23505') return;
     throw insertError;
   }
   if (!inserted) return;
+
   const loginUrl = `${publicUrl}/admin/${encodeURIComponent(pathToken)}`;
-  const qrUrl = `${loginUrl}?qr=${encodeURIComponent(qrToken)}`;
-  const qrDataUrl = await QRCode.toDataURL(qrUrl, { errorCorrectionLevel: 'H', margin: 2, width: 320 });
-  const html = `
-    <div style="font-family:Arial,sans-serif;max-width:620px;margin:auto;color:#172033;line-height:1.7">
-      <h2>معلومات الدخول اليومية إلى لوحة الإدارة</h2>
-      <p>هذه الرسالة مخصصة لبوابة الإدارة على موقعك نفسه. تنتهي صلاحية المعلومات عند نهاية اليوم بالتوقيت العالمي UTC.</p>
-      <p><b>رابط بوابة الإدارة:</b><br><a href="${loginUrl}">${loginUrl}</a></p>
-      <p><b>مفتاح الدخول اليومي:</b></p><p style="font-family:monospace;font-size:20px;letter-spacing:2px;background:#f3f4f6;padding:12px">${dailyKey}</p>
-      <p><b>بريد الحساب الإداري:</b> ${ADMIN_GATE_EMAIL}</p>
-      <p>افتح الرابط وأدخل المفتاح، ثم سجّل الدخول بكلمة المرور التي تحتفظ بها أنت. بعد ذلك امسح صورة QR المرفقة من نفس الجهاز/المتصفح الذي سجلت الدخول منه.</p>
-      <p>لا يتم إرسال كلمة المرور في البريد. رمز QR اليومي رابط تحقق مؤقت وليس بديلاً عن كلمة المرور أو التحقق متعدد العوامل.</p>
-      <p style="color:#64748b;font-size:12px">إذا لم تطلب هذه الرسالة، تجاهلها. لا تشارك الرسالة أو الرابط مع أي شخص.</p>
-    </div>`;
   try {
-    await sendAdminGateEmail(ADMIN_GATE_EMAIL, `مفتاح بوابة الإدارة اليومي — ${today}`, html, qrDataUrl);
-    const { error: sentError } = await db.from('store_admin_daily_access').update({ sent_at: new Date().toISOString() }).eq('id', inserted.id);
+    // Supabase Auth sends the actual magic-link email. The link is bound to the daily URL,
+    // and the normal server-side role check plus mandatory MFA still gate administrator access.
+    await sendSupabaseAuthLink(ADMIN_GATE_EMAIL, loginUrl);
+    const now = new Date().toISOString();
+    const { error: sentError } = await db.from('store_admin_daily_access').update({
+      sent_at: now,
+      key_verified_at: now,
+    }).eq('id', inserted.id);
     if (sentError) throw sentError;
-    console.info(`[Admin Gate] Daily access message sent for ${today}.`);
+    console.info(`[Admin Gate] Supabase Auth daily sign-in link queued for ${today}.`);
   } catch (error) {
     await db.from('store_admin_daily_access').delete().eq('id', inserted.id);
     throw error;
@@ -685,10 +661,10 @@ app.get('/api/public-config', (_req, res) => {
       const db = getSupabaseAdmin();
       const { data: profile, error: profileError } = await db.from('store_profiles').select('id,role,account_status,email').eq('id', user.id).maybeSingle();
       if (profileError || !profile || !['admin','super_admin'].includes(profile.role) || profile.account_status !== 'active' || String(profile.email || '').toLowerCase() !== ADMIN_GATE_EMAIL) return res.status(403).json({ success: false, message: 'الحساب غير مخوّل لبوابة الإدارة.' });
-      const { data: gate, error: gateError } = await db.from('store_admin_daily_access').select('id,key_verified_at,expires_at,sent_at,used_at').eq('access_date', utcDateKey()).eq('path_token_hash', sha256(pathToken)).maybeSingle();
+      const { data: gate, error: gateError } = await db.from('store_admin_daily_access').select('id,key_verified_at,qr_verified_at,expires_at,sent_at,used_at').eq('access_date', utcDateKey()).eq('path_token_hash', sha256(pathToken)).maybeSingle();
       if (gateError) throw gateError;
       if (!gate || !gate.sent_at || !gate.key_verified_at || gate.used_at || new Date(gate.expires_at).getTime() < Date.now()) return res.status(401).json({ success: false, message: 'يجب التحقق من المفتاح اليومي أولاً.' });
-      const { error: updateError } = await db.from('store_admin_daily_access').update({ user_id: user.id }).eq('id', gate.id);
+      const { error: updateError } = await db.from('store_admin_daily_access').update({ user_id: user.id, qr_verified_at: gate.qr_verified_at || new Date().toISOString() }).eq('id', gate.id);
       if (updateError) throw updateError;
       return res.json({ success: true });
     } catch (error: any) { return res.status(String(error?.message || '').includes('token') ? 401 : 503).json({ success: false, message: 'تعذر التحقق من حساب الإدارة.' }); }

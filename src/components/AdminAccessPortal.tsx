@@ -6,7 +6,7 @@ import { AdminMfaScreen } from './AdminMfaScreen';
 import { User } from '../types';
 import { Mail, ShieldCheck, Loader2, AlertCircle, CheckCircle2, KeyRound, LockKeyhole, QrCode } from 'lucide-react';
 
-const ADMIN_ACCESS_EMAIL = 'maybepq22@gmail.com';
+const ADMIN_ACCESS_EMAIL = 'jadoo6922@gmail.com';
 type ViewState = 'checking' | 'key' | 'login' | 'waiting-qr' | 'mfa' | 'denied';
 
 function toAdminProfile(row: any, fallbackEmail: string): User {
@@ -75,7 +75,7 @@ export function AdminAccessPortal() {
         if (qrToken) {
           const completed = await completeQrIfPresent();
           if (completed) return;
-          if (alive) { setMessage('امسح رمز QR بعد إدخال المفتاح وتسجيل الدخول في هذا المتصفح.'); setView('key'); }
+          if (alive) { setMessage('افتح رابط تسجيل الدخول المرسل إلى بريد الإدارة أولاً؛ سيعود بك إلى هذه البوابة بعد التحقق من البريد.'); setView('denied'); }
           return;
         }
         const { data } = await supabase.auth.getSession();
@@ -83,10 +83,10 @@ export function AdminAccessPortal() {
           const row = await fetchOwnProfile();
           if (row && row.id === data.session.user.id && ['admin', 'super_admin'].includes(row.role) && row.account_status === 'active') {
             const response = await fetch('/api/admin/access/verify-login', { method: 'POST', headers: { Authorization: `Bearer ${data.session.access_token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ pathToken }) });
-            if (response.ok) { setProfile(toAdminProfile(row, data.session.user.email || ADMIN_ACCESS_EMAIL)); setView('waiting-qr'); return; }
+            if (response.ok) { setProfile(toAdminProfile(row, data.session.user.email || ADMIN_ACCESS_EMAIL)); setView('mfa'); return; }
           }
         }
-        if (alive) setView('key');
+        if (alive) { setMessage('افتح رابط تسجيل الدخول الذي أرسله Supabase إلى بريد الإدارة. لا تستخدم الرابط اليومي وحده من دون رابط البريد.'); setView('denied'); }
       } catch (error: any) {
         if (alive) { setMessage(error?.message || 'تعذر التحقق من رابط الإدارة.'); setView('denied'); }
       }
@@ -153,21 +153,16 @@ export function AdminAccessPortal() {
         <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-[#c5a059]/40 bg-black/25 text-[#d9b76d]"><ShieldCheck className="h-7 w-7" /></div>
         <p className="mb-2 text-[10px] font-bold uppercase tracking-[.28em] text-[#d9b76d]">Private Control Gateway</p>
         <h1 className="text-2xl font-black tracking-tight sm:text-3xl">بوابة الإدارة الخاصة</h1>
-        <p className="mt-3 text-sm leading-6 text-white/60">بوابة داخل الموقع نفسه، برابط يومي طويل ومفتاح مؤقت، ثم كلمة مرور الحساب ورمز QR والتحقق متعدد العوامل.</p>
+        <p className="mt-3 text-sm leading-6 text-white/60">بوابة داخل الموقع نفسه برابط يومي عبر Supabase Auth، مع التحقق من صلاحية الحساب والتحقق متعدد العوامل.</p>
       </header>
       <div className="space-y-5 px-7 py-7 sm:px-9 sm:py-8">
         {view === 'checking' && <div className="flex items-center justify-center gap-3 py-8 text-sm text-white/65"><Loader2 className="h-5 w-5 animate-spin text-[#d9b76d]" /> جارٍ التحقق من رابط الدخول...</div>}
-        {view === 'key' && <>
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-4"><div className="flex items-start gap-3"><KeyRound className="mt-1 h-5 w-5 text-[#d9b76d]" /><div><p className="text-sm font-bold">الخطوة الأولى: مفتاح اليوم</p><p className="mt-1 text-xs leading-5 text-white/50">يُرسل المفتاح يومياً إلى البريد المخصص، وتنتهي صلاحيته بنهاية اليوم.</p><p className="mt-2 break-all font-mono text-xs text-[#e7ce98]">{ADMIN_ACCESS_EMAIL}</p></div></div></div>
-          <input value={dailyKey} onChange={e => setDailyKey(e.target.value.toUpperCase().slice(0, 40))} autoComplete="one-time-code" placeholder="أدخل مفتاح اليوم" className="w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3.5 text-center font-mono tracking-widest text-white" />
-          <button onClick={() => void verifyKey()} disabled={loading || dailyKey.trim().length < 8} className="flex w-full items-center justify-center gap-2 rounded-xl border border-[#d7b56c]/50 bg-gradient-to-l from-[#8c172d] to-[#4b0d1b] px-4 py-4 text-sm font-bold disabled:opacity-50">{loading ? <Loader2 className="h-5 w-5 animate-spin" /> : <><KeyRound className="h-4 w-4" /> التحقق من المفتاح</>}</button>
-        </>}
         {view === 'login' && <>
           <div className="rounded-2xl border border-white/10 bg-black/20 p-4"><p className="text-sm font-bold">الخطوة الثانية: بيانات الحساب</p><p className="mt-1 text-xs leading-5 text-white/50">أدخل كلمة المرور التي أنشأتها للحساب. لن يتم إرسال كلمة المرور عبر البريد.</p><p className="mt-2 break-all font-mono text-sm text-[#e7ce98]">{ADMIN_ACCESS_EMAIL}</p></div>
           <label className="block text-xs text-white/65">كلمة المرور<input type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" className="mt-2 w-full rounded-xl border border-white/10 bg-black/40 px-4 py-3.5 text-white" /></label>
           <button onClick={() => void login()} disabled={loading || !password} className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-l from-[#8c172d] to-[#4b0d1b] px-4 py-4 text-sm font-bold disabled:opacity-50">{loading ? <Loader2 className="h-5 w-5 animate-spin" /> : <><LockKeyhole className="h-4 w-4" /> التحقق من الحساب</>}</button>
         </>}
-        {view === 'waiting-qr' && <div className="rounded-2xl border border-emerald-400/20 bg-emerald-950/20 p-5"><CheckCircle2 className="mb-3 h-7 w-7 text-emerald-300" /><h2 className="font-bold">تم التحقق من الحساب</h2><p className="mt-2 text-sm leading-6 text-white/65">الخطوة التالية: امسح رمز QR الموجود في الرسالة اليومية. افتح الرمز على نفس الجهاز والمتصفح الذي سجلت الدخول منه؛ بعد ذلك سيظهر التحقق متعدد العوامل.</p><div className="mt-4 flex items-center gap-2 text-xs text-[#e7ce98]"><QrCode className="h-4 w-4" /> بانتظار تأكيد رمز اليوم</div></div>}
+        {view === 'waiting-qr' && <div className="rounded-2xl border border-emerald-400/20 bg-emerald-950/20 p-5"><CheckCircle2 className="mb-3 h-7 w-7 text-emerald-300" /><h2 className="font-bold">تم التحقق من الحساب</h2><p className="mt-2 text-sm leading-6 text-white/65">تم التحقق من رابط البريد والحساب. أكمل الآن التحقق متعدد العوامل.</p><div className="mt-4 flex items-center gap-2 text-xs text-[#e7ce98]"><ShieldCheck className="h-4 w-4" /> تم التحقق من رابط البريد</div></div>}
         {view === 'denied' && <div role="alert" className="rounded-2xl border border-red-400/20 bg-red-950/20 p-5"><AlertCircle className="mb-3 h-7 w-7 text-red-300" /><h2 className="font-bold">تعذر فتح بوابة الإدارة</h2><p className="mt-2 text-sm leading-6 text-white/70">{message || 'الرابط غير صالح أو انتهت صلاحيته.'}</p></div>}
         {message && view !== 'denied' && <p role="alert" className="rounded-xl border border-red-400/20 bg-red-950/20 p-3 text-xs leading-5 text-red-200">{message}</p>}
         <div className="flex items-start gap-2 border-t border-white/10 pt-4 text-[10px] leading-5 text-white/35"><Mail className="mt-0.5 h-4 w-4 shrink-0 text-[#c5a059]/70" /><p>لا تشارك الرابط أو المفتاح أو رمز QR. كلمة المرور لا تُرسل بالبريد. يتطلب الدخول النهائي أيضاً اجتياز التحقق متعدد العوامل.</p></div>

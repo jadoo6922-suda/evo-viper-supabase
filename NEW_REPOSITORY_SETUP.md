@@ -12,17 +12,17 @@ This is a clean source snapshot prepared for a new repository, not a claim that 
 4. Never upload `.env`, API keys, service-role keys, access tokens, QR secrets, or daily admin links. `.env.example` contains placeholders only.
 
 ## Admin URL token
-The application generates the daily path token on the server using `crypto.randomBytes(32).toString('base64url')`. That yields 32 cryptographically random bytes (256 bits; usually 43 URL-safe characters). It is not a permanent token to manually invent or commit. Each daily email contains the new link, key, and QR. The prior day’s row is deleted and its link expires. Do not put a fixed admin token in source code or GitHub.
+The application generates the daily path token on the server using `crypto.randomBytes(32).toString('base64url')`. That yields 32 cryptographically random bytes (256 bits; usually 43 URL-safe characters). It is not a permanent token to manually invent or commit. The daily email is sent through Supabase Auth magic-link delivery. Only a SHA-256 hash of the daily path token is stored in the database; the prior day’s row is deleted and the link expires. Do not put a fixed admin token in source code or GitHub.
 
 ## Render environment
-Configure values from `.env.example` in Render's Environment settings. In particular, set `PUBLIC_APP_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `RECEIPT_HMAC_SECRET`, `RESEND_API_KEY`, `ADMIN_EMAIL_FROM`, and `ADMIN_GATE_CRON_SECRET`. Generate secret values using a cryptographically secure generator; do not reuse the daily URL token as any environment secret. Verify the sender domain with the mail provider before expecting daily email delivery.
+Configure values from `.env.example` in Render's Environment settings. In particular, set `PUBLIC_APP_URL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `RECEIPT_HMAC_SECRET` and `ADMIN_GATE_CRON_SECRET`. Generate secret values using a cryptographically secure generator; do not reuse the daily URL token as any environment secret. Configure Supabase Auth email delivery and allow-list the Render admin redirect URL before expecting daily email delivery.
 
 ## Validation checklist
 - `npm ci` (or `npm install` if no lockfile exists)
 - `npm run lint`
 - `npm run build`
 - Run the Supabase migrations against a clean test project and verify schema parity
-- Test sign-up/profile creation, sign-in, admin daily email, single-use key, password login, QR completion, MFA/AAL2, session revocation, product publishing/purchase/download, transfers, merchant application/activation, support tickets, reviews, and dispute settlement
+- Test sign-up/profile creation, sign-in, admin daily Supabase Auth email, single-use daily link, MFA/AAL2, session revocation, product publishing/purchase/download, transfers, merchant application/activation, support tickets, reviews, and dispute settlement
 - Only deploy after all checks pass; do not enable real-money flows until financial integration tests pass
 
 

@@ -58,10 +58,10 @@ This is a substantial migration pass, but **the full migration is not yet comple
 
 ## Same-site daily admin gate implementation update (13 October 2026)
 - Replaced the old `/admin-access` email magic-link approach with a single-site route `/admin/<daily-random-token>`.
-- Added a daily server-side gate job using `PUBLIC_APP_URL`, `RESEND_API_KEY`, and `ADMIN_EMAIL_FROM`, plus a `CRON_SECRET`-protected endpoint so an external scheduler can trigger delivery reliably if Render sleeps. It generates a path token, daily key, and QR URL; only token hashes are stored in `store_admin_daily_access`, and older date rows are deleted on the next daily run.
-- Added key verification, admin-account verification, and one-use QR completion endpoints. Access remains restricted to the active `admin`/`super_admin` account matching `maybepq22@gmail.com`, followed by the existing Supabase TOTP MFA gate. No password or TOTP secret is emailed.
+- Added a daily server-side gate job using `PUBLIC_APP_URL` and Supabase Auth email delivery, plus a `CRON_SECRET`-protected endpoint so an external scheduler can trigger delivery reliably if Render sleeps. It generates a one-use daily path token and sends a Supabase Auth magic link; only token hashes are stored in `store_admin_daily_access`, and older date rows are deleted on the next daily run.
+- Added admin-account verification and a daily access gate followed by Supabase TOTP MFA. Access remains restricted to the active `admin`/`super_admin` account matching `jadoo6922@gmail.com`, followed by the existing Supabase TOTP MFA gate. No password or TOTP secret is emailed.
 - Added `supabase/migrations/20261013_daily_admin_access_gate.sql`; the matching table and expiry index have been applied to the linked Supabase project. Added a separate migration for support-ticket indexes; those indexes were applied to the remote project. A unique review index was not applied; duplicate prevention currently uses an application-side check and should be hardened with a concurrency-safe DB constraint in the next migration.
-- Email delivery has not been end-to-end tested: a verified Resend sender and the three Render environment variables must be configured. The project build/typecheck still cannot be certified because dependency installation times out in this environment.
+- Email delivery has not been end-to-end tested: Supabase Auth email delivery and the Render redirect URL allow-list must be configured. The project build/typecheck still cannot be certified because dependency installation times out in this environment.
 
 - The source tree was scanned and no Firebase client/Admin/Functions imports remain in `src` or `server.ts`; this does not by itself certify feature parity or production readiness.
 

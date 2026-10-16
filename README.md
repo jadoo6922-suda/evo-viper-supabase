@@ -14,8 +14,7 @@ This branch is the local working copy of the Supabase-backed application. It is 
 - `SUPABASE_SERVICE_ROLE_KEY` — secret, server-only; never use a `VITE_` prefix
 - `RECEIPT_HMAC_SECRET` — strong random secret, required at startup
 - `PUBLIC_APP_URL` — canonical Render URL (for example `https://your-app.onrender.com`), no trailing slash
-- `RESEND_API_KEY` — server-only API key for Resend daily admin email delivery
-- `ADMIN_EMAIL_FROM` — verified sender address/domain in Resend
+- Supabase Auth email delivery must be configured in Supabase Authentication settings; the app does not call Resend or another external mail API
 - `ADMIN_GATE_CRON_SECRET` — random secret of at least 32 characters to authorize an external daily scheduler call to `/api/cron/admin-daily-gate`
 - `GEMINI_API_KEY` — optional unless OCR verification is used
 - `BOOTSTRAP_SECRET` — one-time super-admin bootstrap only; remove after setup
@@ -23,9 +22,9 @@ This branch is the local working copy of the Supabase-backed application. It is 
 
 ### Daily admin access gateway
 - The administration gateway is on the same app at `/admin/<daily-random-token>`; it is not a second site.
-- Each day the server generates a one-use path token, a separate daily key, and a QR link, stores only SHA-256 hashes in `store_admin_daily_access`, and emails them to `maybepq22@gmail.com`. Previous-day rows are deleted by the daily job.
-- The admin enters the daily key, signs in using the dedicated Supabase Auth account password, opens the QR link in the same browser session, and completes Supabase TOTP MFA. The password and TOTP setup secret are never emailed. The daily gate is marked used only after MFA succeeds, so a failed TOTP attempt does not immediately consume the day’s link.
-- Daily mail requires a verified Resend sender and the three environment variables above. If any are missing, the app logs that delivery is disabled and does not send a message. For a Render instance that sleeps, configure an external daily scheduler to POST to `/api/cron/admin-daily-gate` with `Authorization: Bearer <ADMIN_GATE_CRON_SECRET>`; this is a scheduler call to the same website, not a second website. The mailbox address must match an active `admin` or `super_admin` profile in `store_profiles`.
+- Each day the server generates a one-use path token, stores only its SHA-256 hash in `store_admin_daily_access`, and asks Supabase Auth to email a magic link to `jadoo6922@gmail.com`. Previous-day rows are deleted by the daily job.
+- The admin opens the Supabase Auth magic link, which establishes the account session and returns to the one-use daily admin URL, then completes Supabase TOTP MFA. The password and TOTP setup secret are never emailed. The daily gate is marked used only after MFA succeeds, so a failed TOTP attempt does not immediately consume the day’s link.
+- Daily email depends on Supabase Auth email delivery being configured and the Render `PUBLIC_APP_URL` being allow-listed under Supabase Auth redirect URLs. The app does not call Resend or another external mail API. For a Render instance that sleeps, configure an external daily scheduler to POST to `/api/cron/admin-daily-gate` with `Authorization: Bearer <ADMIN_GATE_CRON_SECRET>`; this is a scheduler call to the same website, not a second website. The fixed mailbox `jadoo6922@gmail.com` must match an active `admin` or `super_admin` profile in `store_profiles`.
 - `PORT` — supplied by Render
 
 Never commit `.env` or service-role credentials. If a secret was ever pasted into a chat, repository, or client-side variable, rotate it.
@@ -58,12 +57,12 @@ The remote Supabase project already had its base `store_*` schema and wallet RPC
 ## Private administrator access gateway
 
 - The admin gateway is on the same deployed site at `/admin/<daily-random-token>`. There is no second website.
-- The server generates a fresh daily path token, daily key, and QR link; only SHA-256 hashes are stored in `store_admin_daily_access`. Old daily records are deleted, and each token expires at the end of the UTC day.
-- The flow is: enter the daily key → enter the dedicated Supabase Auth account password → scan the daily QR link in the same browser session → complete Supabase TOTP MFA. The password and TOTP enrollment secret are never emailed.
-- `maybepq22@gmail.com` must be an existing active `admin` or `super_admin` account in both Supabase Auth and `store_profiles`.
-- Configure a verified Resend sender and `PUBLIC_APP_URL`, `RESEND_API_KEY`, `ADMIN_EMAIL_FROM`, and `ADMIN_GATE_CRON_SECRET` on Render. The app attempts delivery on startup and daily; for sleeping Render instances, use a scheduler to POST to `/api/cron/admin-daily-gate` with `Authorization: Bearer <ADMIN_GATE_CRON_SECRET>` once per day. This scheduler calls the same website and does not create a second website.
+- The server generates a fresh daily path token; only its SHA-256 hash is stored in `store_admin_daily_access`. Old daily records are deleted, and the link expires at the end of the UTC day.
+- The flow is: open the Supabase Auth magic link → verify the active admin account on the server → complete Supabase TOTP MFA. The password and TOTP enrollment secret are never emailed.
+- `jadoo6922@gmail.com` must be an existing active `admin` or `super_admin` account in both Supabase Auth and `store_profiles`.
+- Configure `PUBLIC_APP_URL` and `ADMIN_GATE_CRON_SECRET` on Render, and allow-list `https://evoweb.onrender.com/admin/**` in Supabase Auth redirect URLs. The app attempts delivery on startup and daily; for sleeping Render instances, use a scheduler to POST to `/api/cron/admin-daily-gate` with `Authorization: Bearer <ADMIN_GATE_CRON_SECRET>` once per day. This scheduler calls the same website and does not create a second website.
 - A super-admin-only remote session revocation endpoint sets a server-side cutoff; protected server API requests reject tokens issued before that cutoff. This is application-level revocation, not a claim that Supabase Auth globally deleted every session or that an already-open browser instantly clears its local UI.
 - Never commit `.env` or service-role credentials. If a secret was pasted into chat or a repository, rotate it.
 
 ## New repository handoff
-See [`NEW_REPOSITORY_SETUP.md`](./NEW_REPOSITORY_SETUP.md) for the clean GitHub repository setup, secret handling, daily admin-link behavior, Render environment variables, and the validation checklist. This source snapshot is still a development build until the listed checks pass.
+See [`NEW_REPOSITORY_SETUP.md`](./NEW_REPOSITORY_SETUP.md) for the clean GitHub repository setup, secret handling, daily Supabase Auth admin-link behavior, Render environment variables, and the validation checklist. This source snapshot is still a development build until the listed checks pass.

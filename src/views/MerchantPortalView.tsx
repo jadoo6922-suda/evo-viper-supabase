@@ -42,7 +42,14 @@ export const MerchantPortalView: React.FC<MerchantPortalViewProps> = ({ onNaviga
   const [actionMsg, setActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Activation token manual input
-  const [activationTokenInput, setActivationTokenInput] = useState('');
+  const [activationTokenInput, setActivationTokenInput] = useState(() => { try { return new URLSearchParams(window.location.search).get('activation_token') || ''; } catch { return ''; } });
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('activation_token')) {
+      url.searchParams.delete('activation_token');
+      window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+    }
+  }, []);
 
   // Product modal
   const [showAddProductModal, setShowAddProductModal] = useState(false);
