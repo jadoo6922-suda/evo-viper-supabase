@@ -6,7 +6,7 @@ import { AdminMfaScreen } from './AdminMfaScreen';
 import { User } from '../types';
 import { Mail, ShieldCheck, Loader2, AlertCircle, CheckCircle2, KeyRound, LockKeyhole, QrCode } from 'lucide-react';
 
-const ADMIN_ACCESS_EMAIL = 'jadoo6922@gmail.com';
+const ADMIN_ACCESS_EMAIL = 'jadoo.6922@gmail.com';
 type ViewState = 'checking' | 'key' | 'login' | 'waiting-qr' | 'mfa' | 'denied';
 
 function toAdminProfile(row: any, fallbackEmail: string): User {
@@ -27,7 +27,8 @@ function toAdminProfile(row: any, fallbackEmail: string): User {
 export function AdminAccessPortal() {
   const { setCurrentUserDirectly, refreshCurrentUser, setActiveTab } = useStore();
   const pathToken = useMemo(() => {
-    const match = window.location.pathname.match(/^\/admin\/([A-Za-z0-9_-]{40,60})\/?$/);
+    try { sessionStorage.setItem('evo_pending_admin_path', window.location.pathname); } catch { /* ignore */ }
+    const match = window.location.pathname.match(/^\/admin\/([A-Za-z0-9_-]{20,80})\/?$/);
     return match?.[1] || '';
   }, []);
   const qrToken = useMemo(() => new URLSearchParams(window.location.search).get('qr') || '', []);

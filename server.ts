@@ -93,7 +93,7 @@ async function verifySupabaseToken(token: string) {
 }
 
 
-const ADMIN_GATE_EMAIL = String(process.env.ADMIN_GATE_EMAIL || 'jadoo6922@gmail.com').trim().toLowerCase();
+const ADMIN_GATE_EMAIL = String(process.env.ADMIN_GATE_EMAIL || 'jadoo.6922@gmail.com').trim().toLowerCase();
 const sha256 = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const utcDateKey = (date = new Date()) => date.toISOString().slice(0, 10);
 const randomToken = (bytes = 32) => crypto.randomBytes(bytes).toString('base64url');

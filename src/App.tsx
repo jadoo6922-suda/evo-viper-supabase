@@ -151,9 +151,20 @@ const MainAppContent: React.FC = () => {
   }
 
   // Daily private admin gateway lives inside this same site at /admin/<daily-token>.
-  if (/^\/admin\/[A-Za-z0-9_-]{40,60}\/?$/.test(window.location.pathname)) {
+  // Accept token lengths used by base64url (typically 43). Keep this check BEFORE the normal login screen.
+  const adminPathMatch = window.location.pathname.match(/^\/admin\/([A-Za-z0-9_-]{20,80})\/?$/);
+  if (adminPathMatch) {
     return <AdminAccessPortal />;
   }
+  // If Supabase dropped the user on "/" with auth hash after magic link, recover admin path from sessionStorage.
+  try {
+    const pendingAdminPath = sessionStorage.getItem('evo_pending_admin_path');
+    if (pendingAdminPath && /^\/admin\/[A-Za-z0-9_-]{20,80}\/?$/.test(pendingAdminPath) && (window.location.hash.includes('access_token') || window.location.search.includes('code='))) {
+      sessionStorage.removeItem('evo_pending_admin_path');
+      window.history.replaceState({}, '', pendingAdminPath + window.location.hash);
+      return <AdminAccessPortal />;
+    }
+  } catch { /* ignore */ }
 
   const params = new URLSearchParams(window.location.search);
   // Compatibility redirect for an old gateway URL; new daily links use /admin/<token>.
