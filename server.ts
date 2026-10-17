@@ -262,7 +262,8 @@ async function deliverDailyAdminGate(options: { forceResend?: boolean } = {}) {
     rowId = existing.id;
   }
 
-  const loginUrl = `${publicUrl}/admin/${encodeURIComponent(pathToken)}`;
+  // Query form survives Supabase email redirects more reliably than /admin/<token> alone.
+  const loginUrl = `${publicUrl}/?admin_gate=${encodeURIComponent(pathToken)}`;
   try {
     const sendResult = await sendSupabaseAuthLinkWithRetry(ADMIN_GATE_EMAIL, loginUrl, 3);
     const now = new Date().toISOString();

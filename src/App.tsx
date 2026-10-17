@@ -150,23 +150,37 @@ const MainAppContent: React.FC = () => {
     );
   }
 
-  // Daily private admin gateway lives inside this same site at /admin/<daily-token>.
-  // Accept token lengths used by base64url (typically 43). Keep this check BEFORE the normal login screen.
-  const adminPathMatch = window.location.pathname.match(/^\/admin\/([A-Za-z0-9_-]{20,80})\/?$/);
-  if (adminPathMatch) {
+  // --- Private admin gateway (must run BEFORE customer AuthScreen) ---
+  // Supported entry forms:
+  //   /admin/<token>
+  //   /?admin_gate=<token>   ← used in email redirects (survives Supabase better than deep paths)
+  const earlyParams = new URLSearchParams(window.location.search);
+  const adminGateFromQuery = earlyParams.get('admin_gate') || '';
+  if (adminGateFromQuery && /^[A-Za-z0-9_-]{20,80}$/.test(adminGateFromQuery)) {
+    try { sessionStorage.setItem('evo_admin_gate_token', adminGateFromQuery); } catch { /* ignore */ }
     return <AdminAccessPortal />;
   }
-  // If Supabase dropped the user on "/" with auth hash after magic link, recover admin path from sessionStorage.
+  const adminPathMatch = window.location.pathname.match(/^\/admin\/([A-Za-z0-9_-]{20,80})\/?$/);
+  if (adminPathMatch) {
+    try { sessionStorage.setItem('evo_admin_gate_token', adminPathMatch[1]); } catch { /* ignore */ }
+    return <AdminAccessPortal />;
+  }
+  // Magic link landed on "/" with hash tokens — recover token from sessionStorage.
   try {
-    const pendingAdminPath = sessionStorage.getItem('evo_pending_admin_path');
-    if (pendingAdminPath && /^\/admin\/[A-Za-z0-9_-]{20,80}\/?$/.test(pendingAdminPath) && (window.location.hash.includes('access_token') || window.location.search.includes('code='))) {
-      sessionStorage.removeItem('evo_pending_admin_path');
-      window.history.replaceState({}, '', pendingAdminPath + window.location.hash);
+    const pendingToken = sessionStorage.getItem('evo_admin_gate_token') || '';
+    const pendingPath = sessionStorage.getItem('evo_pending_admin_path') || '';
+    const hasAuthHash = window.location.hash.includes('access_token') || window.location.hash.includes('refresh_token') || window.location.search.includes('code=');
+    if (hasAuthHash && pendingToken && /^[A-Za-z0-9_-]{20,80}$/.test(pendingToken)) {
+      window.history.replaceState({}, '', `/?admin_gate=${encodeURIComponent(pendingToken)}${window.location.hash}`);
+      return <AdminAccessPortal />;
+    }
+    if (hasAuthHash && pendingPath && /^\/admin\/[A-Za-z0-9_-]{20,80}\/?$/.test(pendingPath)) {
+      window.history.replaceState({}, '', pendingPath + window.location.hash);
       return <AdminAccessPortal />;
     }
   } catch { /* ignore */ }
 
-  const params = new URLSearchParams(window.location.search);
+  const params = earlyParams;
   // Compatibility redirect for an old gateway URL; new daily links use /admin/<token>.
   if (window.location.pathname.replace(/\/+$/, '') === '/admin-access' || params.get('gate') === '1') {
     window.history.replaceState({}, '', '/');

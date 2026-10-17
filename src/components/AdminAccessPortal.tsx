@@ -29,9 +29,19 @@ type ViewState = 'checking' | 'login' | 'link_sent' | 'mfa' | 'denied';
 export function AdminAccessPortal() {
   const { setCurrentUserDirectly, refreshCurrentUser, setActiveTab } = useStore();
   const pathToken = useMemo(() => {
-    try { sessionStorage.setItem('evo_pending_admin_path', window.location.pathname); } catch { /* ignore */ }
+    const fromQuery = new URLSearchParams(window.location.search).get('admin_gate') || '';
     const match = window.location.pathname.match(/^\/admin\/([A-Za-z0-9_-]{20,80})\/?$/);
-    return match?.[1] || '';
+    const fromPath = match?.[1] || '';
+    let fromStore = '';
+    try { fromStore = sessionStorage.getItem('evo_admin_gate_token') || ''; } catch { /* ignore */ }
+    const token = fromQuery || fromPath || fromStore || '';
+    if (token) {
+      try {
+        sessionStorage.setItem('evo_admin_gate_token', token);
+        sessionStorage.setItem('evo_pending_admin_path', `/admin/${token}`);
+      } catch { /* ignore */ }
+    }
+    return token;
   }, []);
 
   const [view, setView] = useState<ViewState>('checking');
@@ -154,7 +164,7 @@ export function AdminAccessPortal() {
     setLoading(true);
     setMessage('');
     try {
-      const redirectTo = `${window.location.origin}/admin/${pathToken}`;
+      const redirectTo = `${window.location.origin}/?admin_gate=${encodeURIComponent(pathToken)}`;
       const { error } = await supabase.auth.signInWithOtp({
         email: ADMIN_ACCESS_EMAIL,
         options: {
