@@ -24,6 +24,7 @@ export interface ProductsContextType {
   resolveEscrowDispute: (disputeId: string, decision: 'refund_buyer' | 'release_seller') => Promise<{ success: boolean; message?: string }>;
   setProducts: React.Dispatch<React.SetStateAction<Product[]>>;
   setOrders: React.Dispatch<React.SetStateAction<Order[]>>;
+  refreshCatalog: () => Promise<void>;
 }
 
 const ProductsContext = createContext<ProductsContextType | undefined>(undefined);
@@ -40,6 +41,28 @@ export function ProductsProvider({ children }: { children: ReactNode }) {
   const [orders, setOrders] = useState<Order[]>([]);
 
   const [escrowThreshold, setEscrowThreshold] = useState<number>(500);
+
+
+  const refreshCatalog = useCallback(async () => {
+    if (!supabase) return;
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+      const headers: Record<string, string> = { cache: 'no-store' } as any;
+      const catalogRes = await fetch('/api/catalog-data', {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        cache: 'no-store',
+      });
+      if (!catalogRes.ok) return;
+      const catalogPayload = await catalogRes.json();
+      const productRows = catalogPayload.products || [];
+      const orderRows = catalogPayload.orders || [];
+      setProducts(productRows.map((row: any) => ({ id: row.id, name: row.title, nameEn: row.title_en || row.title, title: row.title, description: row.description || '', descriptionEn: row.metadata?.description_en || '', price: Number(row.price), category: row.category || 'development', tags: row.metadata?.tags || [], thumbnail: row.image_url || '', images: Array.isArray(row.image_urls) ? row.image_urls : [], demoVideoUrl: row.demo_video_url || undefined, demoUrl: row.demo_url || undefined, fileFormat: row.file_format || undefined, downloadUrl: undefined, fileName: row.file_name || undefined, fileData: undefined, fileStoragePath: undefined, fileType: row.file_type || undefined, fileSize: row.file_size || undefined, version: row.metadata?.version || '1.0', changelog: row.metadata?.changelog || '', compatibility: row.metadata?.compatibility || '', terms: row.metadata?.terms || '', status: row.status === 'pending' ? 'pending_review' : row.status, downloadsCount: Number(row.downloads_count || 0), rating: Number(row.rating || 0), ratingCount: Number(row.rating_count || 0), updatedAt: row.updated_at, createdAt: row.created_at, features: Array.isArray(row.features) ? row.features : [], featuresEn: Array.isArray(row.features_en) ? row.features_en : [], sellerId: row.seller_id || undefined, sellerName: row.seller_name || undefined, rejectionReason: undefined })));
+      setOrders(orderRows.map((row: any) => ({ id: row.id, userId: row.user_id, sellerId: row.seller_id || undefined, productId: row.product_id, productName: row.product_name || '', productThumbnail: row.product_thumbnail || undefined, price: Number(row.amount), status: row.escrow_status === 'held' ? 'escrow_held' : row.escrow_status === 'disputed' || row.status === 'disputed' ? 'escrow_disputed' : row.status === 'completed' ? 'completed' : row.status, useEscrow: Boolean(row.use_escrow), disputeId: row.dispute_id || undefined, createdAt: row.created_at, transactionId: row.transaction_id || '', downloadUrl: undefined, downloadUrlExpiresAt: row.download_url_expires_at || undefined, downloadsCount: Number(row.downloads_count || 0), maxDownloads: row.max_downloads || undefined })));
+    } catch {
+      /* ignore refresh errors */
+    }
+  }, []);
 
   // Load catalog and the signed-in user's orders from Supabase.
   useEffect(() => {

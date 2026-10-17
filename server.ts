@@ -1483,7 +1483,7 @@ app.get('/api/public-config', (_req, res) => {
       if (!profile || profile.role !== 'merchant' || profile.account_status !== 'active' || !profile.merchant_activated_at || profile.merchant_license_revoked_at) return res.status(403).json({ success: false, message: 'يجب أن يكون حساب التاجر مفعلاً ورخصته سارية.' });
       const images = Array.isArray(p.images) ? p.images.filter((v: unknown) => typeof v === 'string' && /^https:\/\//i.test(v)).slice(0, 10) : [];
       const productId = /^[0-9a-f-]{36}$/i.test(String(p.id || '')) ? String(p.id) : crypto.randomUUID();
-      const record: any = { id: productId, seller_id: user.id, title, title_en: String(p.titleEn || title).slice(0, 160), description, category: String(p.category || 'development'), price, currency: 'COIN', image_url: images[0] || null, image_urls: images, status: 'pending', is_digital: true, seller_name: user.user_metadata?.display_name || user.email || 'Merchant', metadata: { tags: Array.isArray(p.tags) ? p.tags.slice(0, 30) : [] }, updated_at: new Date().toISOString() };
+      const record: any = { id: productId, seller_id: user.id, title, title_en: String(p.titleEn || title).slice(0, 160), description, category: String(p.category || 'development'), price, currency: 'COIN', image_url: images[0] || null, image_urls: images, status: 'published', is_digital: true, seller_name: user.user_metadata?.display_name || user.email || 'Merchant', metadata: { tags: Array.isArray(p.tags) ? p.tags.slice(0, 30) : [] }, updated_at: new Date().toISOString() };
       const { data: existing } = await db.from('store_products').select('id,seller_id').eq('id', productId).maybeSingle();
       if (existing && existing.seller_id !== user.id) return res.status(403).json({ success: false, message: 'لا يمكنك تعديل منتج لا تملكه.' });
       const { error } = await db.from('store_products').upsert(record, { onConflict: 'id' });
@@ -2034,13 +2034,32 @@ app.get('/api/public-config', (_req, res) => {
       let recipientId = recipientInput;
       let recipientRow: any = null;
       if (!/^[0-9a-f-]{36}$/i.test(recipientInput)) {
-        const { data: byUsername } = await db.from('store_profiles').select('id,display_name,account_status').eq('username', recipientInput.toLowerCase()).maybeSingle();
+        const needle = recipientInput.toLowerCase();
         const normalizedCode = recipientInput.toUpperCase();
         const looksLikeTransferCode = /^TRF-[A-HJ-NP-Z2-9]{6}$/.test(normalizedCode);
-        const { data: byCode } = byUsername || !looksLikeTransferCode ? { data: null } : await db.from('store_profiles').select('id,display_name,account_status,transfer_code_expires_at').eq('transfer_code', sha256(normalizedCode)).maybeSingle();
-        const { data: byEmail } = byUsername || byCode ? { data: null } : await db.from('store_profiles').select('id,display_name,account_status').eq('email', recipientInput.toLowerCase()).maybeSingle();
-        recipientRow = byUsername || byCode || byEmail;
-        if (!recipientRow) return res.status(404).json({ success: false, message: 'لم يتم العثور على المستلم.' });
+        // Resolve recipient across username / email / transfer code on the shared production profiles table.
+        let byUsername: any = null;
+        let byEmail: any = null;
+        let byCode: any = null;
+        {
+          const { data } = await db.from('store_profiles').select('id,display_name,account_status,username,email')
+            .or(`username.eq.${needle},email.eq.${needle}`)
+            .limit(5);
+          const rows = data || [];
+          byUsername = rows.find((r: any) => String(r.username || '').toLowerCase() === needle) || null;
+          byEmail = rows.find((r: any) => String(r.email || '').toLowerCase() === needle) || null;
+        }
+        if (!byUsername && !byEmail && looksLikeTransferCode) {
+          const { data } = await db.from('store_profiles').select('id,display_name,account_status,transfer_code_expires_at').eq('transfer_code', sha256(normalizedCode)).maybeSingle();
+          byCode = data;
+        }
+        // Fallback: case-insensitive username match when exact eq missed mixed-case legacy rows.
+        if (!byUsername && !byEmail && !byCode && /^[a-z0-9_]{3,24}$/i.test(needle)) {
+          const { data } = await db.from('store_profiles').select('id,display_name,account_status,username').ilike('username', needle).limit(3);
+          byUsername = (data || []).find((r: any) => String(r.username || '').toLowerCase() === needle) || (data || [])[0] || null;
+        }
+        recipientRow = byUsername || byEmail || byCode;
+        if (!recipientRow) return res.status(404).json({ success: false, message: 'لم يتم العثور على المستلم. تأكد من اسم المستخدم أو البريد في نفس مشروع Supabase.' });
         if (byCode && (!recipientRow.transfer_code_expires_at || Number(recipientRow.transfer_code_expires_at) < Date.now())) return res.status(400).json({ success: false, message: 'انتهت صلاحية رمز التحويل.' });
         recipientId = recipientRow.id;
       } else {
